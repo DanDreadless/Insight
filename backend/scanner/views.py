@@ -116,7 +116,7 @@ class ScanStatusView(APIView):
     def get(self, request: HttpRequest, scan_id: str) -> Response:
         try:
             job = ScanJob.objects.prefetch_related('findings').get(id=scan_id)
-        except ScanJob.DoesNotExist:
+        except (ScanJob.DoesNotExist, ValueError):
             return Response({'error': 'Scan not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = ScanJobSerializer(job)
@@ -155,7 +155,7 @@ class ScanStreamView(View):
 
         try:
             ScanJob.objects.get(id=scan_id)
-        except ScanJob.DoesNotExist:
+        except (ScanJob.DoesNotExist, ValueError):
             return JsonResponse({'error': 'Scan not found.'}, status=404)
 
         def event_stream():
@@ -272,7 +272,7 @@ class ScanSourceView(APIView):
     def get(self, request: HttpRequest, scan_id: str) -> HttpResponse:
         try:
             job = ScanJob.objects.get(id=scan_id)
-        except ScanJob.DoesNotExist:
+        except (ScanJob.DoesNotExist, ValueError):
             return HttpResponse('Scan not found.', status=404, content_type='text/plain')
 
         if job.status != ScanJob.Status.COMPLETE:
