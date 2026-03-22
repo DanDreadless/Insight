@@ -2,7 +2,7 @@
 
 ---
 
-[![License](https://img.shields.io/badge/AGPL-3.0--Clause-blue.svg)](https://github.com/DanDreadless/insight_vault1337/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/AGPL-3.0--Clause-blue.svg)](https://github.com/DanDreadless/Insight/blob/main/LICENSE)
 [![Website](https://img.shields.io/website?url=https%3A%2F%2Finsight.vault1337.com%2F&label=insight.vault1337.com&link=https%3A%2F%2Finsight.vault1337.com%2F)](https://insight.vault1337.com/)
 [![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/DanDreadless?link=https%3A%2F%2Fx.com%2FDanDreadless)](https://x.com/DanDreadless)
 
