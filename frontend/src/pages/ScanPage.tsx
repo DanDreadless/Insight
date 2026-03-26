@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { getScan } from '../api/api'
+import { getScan, getScanUrlHistory } from '../api/api'
+import type { HistoryResponse, ScanSummary } from '../api/api'
 import type { ScanJob } from '../types'
 import ScanProgress from '../components/results/ScanProgress'
 import VerdictBanner from '../components/results/VerdictBanner'
@@ -10,6 +11,129 @@ import TechStack from '../components/results/TechStack'
 import DomainInfo from '../components/results/DomainInfo'
 import SourceViewer from '../components/results/SourceViewer'
 import LoadingSpinner from '../components/LoadingSpinner'
+
+const VERDICT_STYLES: Record<string, { bg: string; border: string; text: string }> = {
+  MALICIOUS:  { bg: 'rgba(127,29,29,0.4)',    border: '#ef4444', text: '#fca5a5' },
+  SUSPICIOUS: { bg: 'rgba(120,53,15,0.4)',    border: '#f97316', text: '#fdba74' },
+  CLEAN:      { bg: 'rgba(20,83,45,0.4)',     border: '#22c55e', text: '#86efac' },
+  UNKNOWN:    { bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.12)', text: 'rgba(255,255,255,0.4)' },
+}
+
+function VerdictBadge({ verdict }: { verdict: string }) {
+  const s = VERDICT_STYLES[verdict] ?? VERDICT_STYLES.UNKNOWN
+  return (
+    <span
+      className="text-xs font-bold px-2 py-0.5 rounded shrink-0"
+      style={{ backgroundColor: s.bg, border: `1px solid ${s.border}`, color: s.text }}
+    >
+      {verdict}
+    </span>
+  )
+}
+
+function PreviousScans({ scanId }: { scanId: string }) {
+  const [data, setData] = useState<HistoryResponse | null>(null)
+  const [page, setPage] = useState(1)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    getScanUrlHistory(scanId, page)
+      .then((res) => { setData(res); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [scanId, page])
+
+  if (!loading && (!data || data.count === 0)) return null
+
+  return (
+    <section className="mt-8">
+      <h2
+        className="text-sm font-semibold mb-3 flex items-center gap-2"
+        style={{ color: 'rgba(255,255,255,0.5)' }}
+      >
+        Previous scans of this URL
+        {data && data.count > 0 && (
+          <span
+            className="text-xs px-2 py-0.5 rounded"
+            style={{ backgroundColor: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.35)' }}
+          >
+            {data.count}
+          </span>
+        )}
+      </h2>
+
+      {loading && (
+        <p className="text-xs" style={{ color: 'rgba(255,255,255,0.25)' }}>Loading…</p>
+      )}
+
+      {!loading && data && data.results.length > 0 && (
+        <>
+          <div
+            className="rounded-lg overflow-hidden mb-3"
+            style={{ border: '1px solid rgba(255,255,255,0.06)' }}
+          >
+            {data.results.map((scan: ScanSummary, idx: number) => (
+              <Link
+                key={scan.id}
+                to={`/scan/${scan.id}`}
+                className="flex items-center gap-3 px-4 py-2.5 transition-colors"
+                style={{
+                  backgroundColor: idx % 2 === 0 ? '#2a3238' : 'rgba(255,255,255,0.02)',
+                  borderTop: idx > 0 ? '1px solid rgba(255,255,255,0.05)' : undefined,
+                  textDecoration: 'none',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(189,54,58,0.08)' }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = idx % 2 === 0 ? '#2a3238' : 'rgba(255,255,255,0.02)' }}
+              >
+                <VerdictBadge verdict={scan.verdict} />
+                <span className="flex-1 text-xs" style={{ color: 'rgba(255,255,255,0.4)' }}>
+                  {scan.findings_count} finding{scan.findings_count !== 1 ? 's' : ''}
+                </span>
+                <span className="text-xs shrink-0" style={{ color: 'rgba(255,255,255,0.3)' }}>
+                  {scan.completed_at
+                    ? new Date(scan.completed_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+                    : new Date(scan.created_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                </span>
+              </Link>
+            ))}
+          </div>
+
+          {data.total_pages > 1 && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((p) => p - 1)}
+                disabled={page <= 1}
+                className="text-xs px-3 py-1 rounded disabled:opacity-30"
+                style={{
+                  backgroundColor: 'rgba(255,255,255,0.06)',
+                  color: 'rgba(255,255,255,0.5)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                }}
+              >
+                Previous
+              </button>
+              <span className="text-xs" style={{ color: 'rgba(255,255,255,0.3)' }}>
+                {data.page} / {data.total_pages}
+              </span>
+              <button
+                onClick={() => setPage((p) => p + 1)}
+                disabled={page >= data.total_pages}
+                className="text-xs px-3 py-1 rounded disabled:opacity-30"
+                style={{
+                  backgroundColor: 'rgba(255,255,255,0.06)',
+                  color: 'rgba(255,255,255,0.5)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                }}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
 
 export default function ScanPage() {
   const { id } = useParams<{ id: string }>()
@@ -260,9 +384,12 @@ export default function ScanPage() {
       {/* Source viewer */}
       <SourceViewer
         scanId={id}
-        mainUrl={scan.scan_metadata?.final_url ?? scan.url}
+        mainUrl={(scan.scan_metadata?.final_url as string | undefined) ?? scan.url}
         scriptUrls={(scan.scan_metadata?.scripts_urls as string[] | undefined) ?? []}
       />
+
+      {/* Previous scans of this URL */}
+      <PreviousScans scanId={id} />
 
       {/* Footer action */}
       <div className="mt-8 text-center">

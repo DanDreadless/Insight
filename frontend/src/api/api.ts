@@ -45,6 +45,13 @@ export async function getHistory(q?: string, page?: number): Promise<HistoryResp
   return response.data
 }
 
+export async function getScanUrlHistory(scanId: string, page?: number): Promise<HistoryResponse> {
+  const params: Record<string, number> = {}
+  if (page && page > 1) params.page = page
+  const response = await apiClient.get<HistoryResponse>(`/scan/${scanId}/url-history/`, { params })
+  return response.data
+}
+
 export async function getScanSource(scanId: string, url?: string): Promise<string> {
   const params = url ? { url } : {}
   const response = await apiClient.get<string>(`/scan/${scanId}/source/`, {

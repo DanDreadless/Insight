@@ -27,6 +27,7 @@ from scanner.modules import (
 )
 from scanner.modules.robots_checker import check_robots
 from scanner.modules.whois_lookup import lookup_whois
+from scanner.modules.engine_version import get_engine_version
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,20 @@ _SCRIPT_CONTENT_TYPES = frozenset({
     # SVG (can contain embedded scripts)
     'image/svg+xml',
 })
+
+
+def _update_progress(job, step: int, total_steps: int, label: str, current_url: str = '', findings_count: int = 0) -> None:
+    """Write incremental progress to scan_metadata so the SSE stream can surface it."""
+    job.scan_metadata = {
+        '_progress': {
+            'step': step,
+            'total_steps': total_steps,
+            'label': label,
+            'current_url': current_url,
+            'findings_count': findings_count,
+        }
+    }
+    job.save(update_fields=['scan_metadata'])
 
 
 def _is_direct_script(url: str, headers: dict) -> bool:
@@ -183,6 +198,7 @@ def run_scan(self, scan_job_id: str) -> dict:
     job.status = ScanJob.Status.RUNNING
     job.save(update_fields=['status'])
 
+    current_engine_version = get_engine_version()
     scan_start = time.monotonic()
     all_findings: list[dict] = []
 
@@ -200,6 +216,7 @@ def run_scan(self, scan_job_id: str) -> dict:
 
         # ----------------------------------------------------------------
         # Step 2: Fetch target page (with scheme fallback)
+        _update_progress(job, 1, 6, 'Fetching page', url, 0)
         # If the initial fetch fails, automatically retry with the alternate
         # scheme (https→http or http→https) before giving up.
         # ----------------------------------------------------------------
@@ -307,6 +324,7 @@ def run_scan(self, scan_job_id: str) -> dict:
                 content_hash=content_hash,
                 status=ScanJob.Status.COMPLETE,
                 cached_from__isnull=True,
+                detection_engine_version=current_engine_version,
             )
             .exclude(id=job.id)
             .order_by('-completed_at')
@@ -325,9 +343,11 @@ def run_scan(self, scan_job_id: str) -> dict:
             job.scan_metadata = cached_job.scan_metadata
             job.cached_from = cached_job
             job.error_message = ''
+            job.detection_engine_version = current_engine_version
             job.save(update_fields=[
                 'status', 'verdict', 'completed_at', 'last_scanned_at',
                 'content_hash', 'scan_metadata', 'cached_from', 'error_message',
+                'detection_engine_version',
             ])
             logger.info('[scan:%s] Cache hit — reused results from job %s', scan_job_id, cached_job.id)
             return {'verdict': cached_job.verdict, 'cached': True}
@@ -475,14 +495,17 @@ def run_scan(self, scan_job_id: str) -> dict:
                 'download_size_seen': size,
                 'download_truncated': truncated,
                 'findings_count': len(all_findings),
+                'engine_version': current_engine_version,
             }
             job.error_message = ''
-            job.save(update_fields=['status', 'verdict', 'completed_at', 'scan_metadata', 'error_message'])
+            job.detection_engine_version = current_engine_version
+            job.save(update_fields=['status', 'verdict', 'completed_at', 'scan_metadata', 'error_message', 'detection_engine_version'])
             return {'verdict': verdict, 'findings_count': len(all_findings)}
 
         # ----------------------------------------------------------------
         # Step 4: Collect resources (text/HTML responses only)
         # ----------------------------------------------------------------
+        _update_progress(job, 2, 6, 'Collecting resources', final_url, len(all_findings))
         logger.info('[scan:%s] Collecting resources', scan_job_id)
         resources = collect_resources(html_content, final_url)
 
@@ -508,6 +531,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         # Step 4b: Header analysis
         # ----------------------------------------------------------------
+        _update_progress(job, 3, 6, 'Analysing headers & SSL', final_url, len(all_findings))
         logger.info('[scan:%s] Analysing headers', scan_job_id)
         header_findings = header_analyser.analyse_headers(response_headers, final_url, status_code)
         for f in header_findings:
@@ -540,6 +564,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         # Step 4c: Domain intelligence
         # ----------------------------------------------------------------
+        _update_progress(job, 4, 6, 'Analysing domain & HTML', final_url, len(all_findings))
         logger.info('[scan:%s] Analysing domain', scan_job_id)
         domain_findings = domain_intelligence.analyse_domain(final_url)
         for f in domain_findings:
@@ -568,6 +593,9 @@ def run_scan(self, scan_job_id: str) -> dict:
         scripts = resources.get('scripts', [])
         processed = 0
         scripts_skipped_budget = 0
+        scripts_total = len(scripts)
+
+        _update_progress(job, 5, 6, f'Analysing scripts (0/{scripts_total})', final_url, len(all_findings))
 
         for script in scripts:
             if processed >= max_resources:
@@ -585,6 +613,7 @@ def run_scan(self, scan_job_id: str) -> dict:
             if script.get('inline'):
                 content = script.get('content', '')
                 if content and content.strip():
+                    _update_progress(job, 5, 6, f'Analysing script {processed + 1}/{scripts_total}', final_url, len(all_findings))
                     logger.info('[scan:%s] Analysing inline script', scan_job_id)
                     try:
                         js_findings = js_analyser.analyse_js(content, final_url)
@@ -598,6 +627,7 @@ def run_scan(self, scan_job_id: str) -> dict:
                 script_url = script.get('url', '')
                 if not script_url:
                     continue
+                _update_progress(job, 5, 6, f'Analysing script {processed + 1}/{scripts_total}', script_url, len(all_findings))
                 logger.info('[scan:%s] Fetching external script: %s', scan_job_id, script_url)
                 try:
                     script_response = fetch(script_url, max_size_bytes=1 * 1024 * 1024)
@@ -637,6 +667,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         # Step 5: Deduplicate, context collapse, sort
         # ----------------------------------------------------------------
+        _update_progress(job, 6, 6, 'Finalising results', final_url, len(all_findings))
         all_findings = scorer.deduplicate_findings(all_findings)
         all_findings = scorer.context_collapse_check(all_findings)
         all_findings = scorer.sort_findings(all_findings)
@@ -684,6 +715,7 @@ def run_scan(self, scan_job_id: str) -> dict:
             'final_url': final_url,
             'redirect_chain': response.get('redirect_chain', []),
             'status_code': status_code,
+            'engine_version': current_engine_version,
             'scripts_count': len(resources.get('scripts', [])),
             'scripts_urls': raw_scripts[:100],
             'scripts_analysed': processed,
@@ -713,9 +745,11 @@ def run_scan(self, scan_job_id: str) -> dict:
         job.content_hash = content_hash
         job.scan_metadata = scan_metadata
         job.error_message = ''
+        job.detection_engine_version = current_engine_version
         job.save(update_fields=[
             'status', 'verdict', 'completed_at', 'last_scanned_at',
             'content_hash', 'scan_metadata', 'error_message',
+            'detection_engine_version',
         ])
 
         logger.info(

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Auto-increment detection engine version when any detection module is staged.
+#
+# To activate, run once from the repo root:
+#   git config core.hooksPath .githooks
+#
+# Detection modules tracked (changes to these bump the version):
+#   backend/scanner/modules/js_analyser.py
+#   backend/scanner/modules/html_analyser.py
+#   backend/scanner/modules/domain_intelligence.py
+#   backend/scanner/modules/header_analyser.py
+#   backend/scanner/modules/ssl_analyser.py
+#   backend/scanner/modules/scorer.py
+#   backend/scanner/modules/known_good_domains.py
+#   backend/scanner/modules/robots_checker.py
+#   backend/scanner/modules/tech_detector.py
+
+set -e
+
+DETECTION_FILES=(
+    "backend/scanner/modules/js_analyser.py"
+    "backend/scanner/modules/html_analyser.py"
+    "backend/scanner/modules/domain_intelligence.py"
+    "backend/scanner/modules/header_analyser.py"
+    "backend/scanner/modules/ssl_analyser.py"
+    "backend/scanner/modules/scorer.py"
+    "backend/scanner/modules/known_good_domains.py"
+    "backend/scanner/modules/robots_checker.py"
+    "backend/scanner/modules/tech_detector.py"
+)
+
+VERSION_FILE="backend/scanner/modules/version.txt"
+
+# Check whether any detection file has staged changes
+changed=false
+staged=$(git diff --cached --name-only)
+for f in "${DETECTION_FILES[@]}"; do
+    if echo "$staged" | grep -qF "$f"; then
+        changed=true
+        break
+    fi
+done
+
+if [ "$changed" = true ]; then
+    if [ -f "$VERSION_FILE" ]; then
+        current=$(tr -d '[:space:]' < "$VERSION_FILE")
+        new=$((current + 1))
+    else
+        new=1
+    fi
+    printf '%s\n' "$new" > "$VERSION_FILE"
+    git add "$VERSION_FILE"
+    echo "  [insight] Detection engine version bumped: $current → $new"
+fi

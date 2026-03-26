@@ -60,31 +60,155 @@ _IPFS_GATEWAY_RE = re.compile(
 
 _CLICKFIX_CAPTCHA_RE = re.compile(
     r'(?:'
+    # Classic fake CAPTCHA framing
     r'verify\s+you(?:\'re|\s+are)\s+(?:human|not\s+a\s+robot)|'
     r'i(?:\'m|\s+am)\s+not\s+a\s+robot|'
     r'human\s+verif(?:y|ication)|'
     r'prove\s+you(?:\'re|\s+are)\s+human|'
-    r'captcha\s+verif'
+    r'captcha\s+verif|'
+    # "Click to fix" / ClickFix-branded variants
+    r'click\s+(?:here\s+)?(?:to\s+)?fix\b|'
+    r'click\s+fix\b|'
+    # Browser / identity verification overlays
+    r'browser\s+verif(?:y|ication)|'
+    r'verify\s+your\s+(?:browser|identity|access)|'
+    r'confirm\s+you(?:\'re|\s+are)\s+(?:human|not\s+a\s+robot)|'
+    # "Action required" / error-page style prompts
+    r'action\s+required.*(?:fix|resolve|continue)|'
+    r'website\s+blocked.*(?:fix|restore|access)'
     r')',
     re.IGNORECASE,
 )
 _CLICKFIX_INSTRUCTION_RE = re.compile(
     r'(?:'
+    # Win+R / Run dialog instructions
     r'press\s+(?:windows|win)\s*\+\s*r\b|'
+    r'(?:use|hit)\s+(?:win(?:dows)?\s*\+\s*r|run\s+dialog)|'
     r'windows\s*\+\s*r\b|'
     r'open\s+run\s+dialog|'
-    r'paste\s+(?:into|in\s+the)\s+(?:run|command|terminal|powershell)|'
+    # Paste-into-terminal instructions
+    r'paste\s+(?:into|in\s+the)\s+(?:run|command|terminal|powershell|cmd|search\s+bar)|'
+    r'paste\s+(?:it\s+)?(?:and|then)\s+(?:run|execute|press\s+enter)|'
+    r'copy\s+(?:and|then)\s+(?:run|execute|paste\s+(?:it\s+)?(?:in|into))|'
+    # Explicit "run the following" framing
+    r'run\s+the\s+following\s+(?:command|script|code|fix)|'
+    r'type\s+the\s+following\s+(?:in|into)|'
+    # Keyboard shortcuts / direct execution prompts
     r'press\s+ctrl\s*\+\s*v|'
     r'open\s+(?:powershell|terminal|command\s+prompt)'
     r')',
     re.IGNORECASE,
 )
 
+# Shell command indicators that are unambiguous when found in HTML attributes
+# or hidden elements — PowerShell, mshta, cmd, and in-memory execution chains
+# have no legitimate reason to appear in data-* attrs, onclick handlers, or
+# display:none content.
+_HTML_SHELL_RE = re.compile(
+    r'(?:'
+    r'powershell(?:\.exe)?(?=[\s\-;,\'"]|$)|'
+    r'mshta(?:\.exe)?(?=[\s:;\'"(]|$)|'
+    r'cmd(?:\.exe)?\s*/[cfkCFK]|'
+    r'wscript(?:\.exe)?(?=[\s\'"(]|$)|'
+    r'cscript(?:\.exe)?(?=[\s\'"(]|$)|'
+    r'rundll32(?:\.exe)?(?=[\s\'"(]|$)|'
+    r'regsvr32(?:\.exe)?(?=[\s\'"(]|$)|'
+    r'\|\s*iex\b|'
+    r';\s*iex\b|'
+    r'&\s*iex\b|'
+    r'\binvoke-expression\b|'
+    r'\binvoke-restmethod\b|'
+    r'\binvoke-webrequest\b'
+    r')',
+    re.IGNORECASE,
+)
+
+_HTML_EVENT_ATTRS: frozenset = frozenset({
+    'onclick', 'onmouseover', 'onmouseout', 'onload', 'onsubmit',
+    'onkeydown', 'onkeyup', 'onfocus', 'onblur', 'onchange',
+    'onmouseenter', 'onmouseleave', 'ondblclick', 'oninput',
+})
+
 _SENSITIVE_COMMENT_KEYWORDS = re.compile(
     r'\b(?:password|api_key|apikey|token|secret|todo|fixme|hack|debug|'
     r'internal|private|credentials|passwd|pwd|auth)\b',
     re.IGNORECASE,
 )
+
+
+def _check_shell_commands_in_html(soup) -> list[dict]:
+    """
+    Detect PowerShell/cmd/mshta shell command strings stored in HTML attributes
+    or hidden elements — the payload-storage half of the ClickFix technique.
+
+    ClickFix attackers commonly keep the clipboard payload out of inline <script>
+    blocks to evade JS-focused scanners.  Instead they store it as:
+      - data-* attribute:  <button data-cmd="powershell -enc ...">
+      - onclick handler:   <button onclick="clipboard.writeText(this.dataset.cmd)">
+      - hidden element:    <div style="display:none">powershell ...</div>
+      - hidden input:      <input type="hidden" value="powershell ...">
+
+    No legitimate page embeds shell commands in these locations.
+    """
+    findings = []
+
+    # 1. data-* attributes and inline event handlers
+    for tag in soup.find_all(True):
+        for attr_name, attr_val in tag.attrs.items():
+            if not isinstance(attr_val, str):
+                continue
+            attr_lower = attr_name.lower()
+            if attr_lower.startswith('data-') or attr_lower in _HTML_EVENT_ATTRS:
+                m = _HTML_SHELL_RE.search(attr_val)
+                if m:
+                    findings.append({
+                        'severity': 'CRITICAL',
+                        'category': 'HTML',
+                        'title': 'Shell command in HTML attribute (ClickFix payload storage)',
+                        'description': (
+                            f'A shell command string ({m.group(0)!r}) was found inside an HTML '
+                            f'{attr_name!r} attribute. This is a ClickFix payload-storage pattern: '
+                            f'the malicious command is embedded in the DOM and passed to '
+                            f'navigator.clipboard.writeText() when the user clicks a fake verification '
+                            f'button. The visitor is then socially engineered to paste and execute it '
+                            f'via Win+R or a terminal prompt. No legitimate page uses this pattern.'
+                        ),
+                        'evidence': f'[<{tag.name}> — {attr_name}]\n{attr_val[:600]}',
+                    })
+                    return findings  # One CRITICAL is enough
+
+    # 2. Hidden element text / hidden input values
+    for tag in soup.find_all(True):
+        style = tag.get('style', '')
+        is_hidden = (
+            re.search(r'display\s*:\s*none|visibility\s*:\s*hidden', style, re.IGNORECASE)
+            or tag.get('type', '').lower() == 'hidden'
+            or tag.name == 'template'
+        )
+        if not is_hidden:
+            continue
+        for candidate in (tag.get_text(strip=True), tag.get('value', '')):
+            if not candidate:
+                continue
+            m = _HTML_SHELL_RE.search(candidate)
+            if m:
+                findings.append({
+                    'severity': 'CRITICAL',
+                    'category': 'HTML',
+                    'title': 'Shell command in hidden HTML element (ClickFix payload storage)',
+                    'description': (
+                        f'A shell command string ({m.group(0)!r}) was found inside a hidden HTML '
+                        f'element (display:none, visibility:hidden, or hidden input). '
+                        f'This is the ClickFix payload-storage pattern: the command is concealed '
+                        f'from the visible page and retrieved by a clipboard.writeText() call when '
+                        f'the user interacts with a fake CAPTCHA or verification overlay. '
+                        f'No legitimate page stores shell commands in hidden elements.'
+                    ),
+                    'evidence': f'[<{tag.name}> — hidden]\n{candidate[:600]}',
+                })
+                return findings
+
+    return findings
 
 
 def _path_extension(href: str) -> str:
@@ -157,13 +281,19 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
                 findings.append({
                     'severity': severity,
                     'category': 'Phishing',
-                    'title': 'Form submits to external domain',
+                    'title': 'Form submits credentials to external domain',
                     'description': (
-                        f'Form action points to "{action_domain}" while page is hosted on "{page_domain}". '
-                        + ('Brand keyword in page title — likely credential phishing.' if has_brand_in_title else
-                           'Cross-domain form submission is suspicious.')
+                        f'A form on "{page_domain}" submits its data to "{action_domain}" — '
+                        'a different domain. This is the core mechanism of a credential harvesting '
+                        'attack: the visitor believes they are submitting to the site they are on, '
+                        'but their input is sent directly to an attacker-controlled server. '
+                        + ('The page title contains a brand keyword, confirming active brand '
+                           'impersonation — victims are being deceived about which site they are on.'
+                           if has_brand_in_title else
+                           'Investigate whether this is a legitimate third-party form processor '
+                           '(e.g., Typeform, Mailchimp) or an attacker\'s collection endpoint.')
                     ),
-                    'evidence': f'action="{action}" | page domain: {page_domain}',
+                    'evidence': f'action="{action}" | page domain: {page_domain} | action domain: {action_domain}',
                 })
 
     # ------------------------------------------------------------------
@@ -199,8 +329,15 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
                 'category': 'HTML',
                 'title': 'Hidden iframe detected',
                 'description': (
-                    'An iframe is hidden via CSS/attributes (display:none, width=0, height=0, etc.). '
-                    'Hidden iframes are used for clickjacking, drive-by downloads, and credential harvesting.'
+                    'An iframe is deliberately hidden using CSS or zero dimensions '
+                    '(display:none, width=0, height=0, or negative off-screen positioning). '
+                    'There is no legitimate reason to embed invisible cross-origin content on a page. '
+                    'Hidden iframes are a well-documented attack primitive used to: '
+                    '(1) load drive-by exploit pages that attack visitor browsers silently, '
+                    '(2) pre-authenticate victims on third-party sites for clickjacking, or '
+                    '(3) trigger automatic resource requests to attacker infrastructure. '
+                    'In the context of other threat signals, this strongly indicates '
+                    'a compromised page or purpose-built attack infrastructure.'
                 ),
                 'evidence': tag_repr,
             })
@@ -256,10 +393,14 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
             findings.append({
                 'severity': 'MEDIUM',
                 'category': 'HTML',
-                'title': 'Right-click disabled via oncontextmenu handler',
+                'title': 'Right-click context menu disabled',
                 'description': (
-                    'The body element has oncontextmenu="return false" which prevents right-clicking. '
-                    'This is used to hide malicious content from casual inspection.'
+                    'The page disables the browser\'s right-click context menu via '
+                    'oncontextmenu="return false". While some legitimate sites use this to '
+                    'protect media assets, in conjunction with other suspicious signals it is '
+                    'an anti-analysis technique: it prevents visitors from easily inspecting '
+                    'links, viewing page source shortcuts, or accessing developer tools via '
+                    'context menu — reducing the chance of casual detection of malicious content.'
                 ),
                 'evidence': f'oncontextmenu="{oncontextmenu}"',
             })
@@ -311,14 +452,18 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
     for href, count in download_link_counts.items():
         ext = _path_extension(href)
         count_note = f' — link appears {count} times on this page' if count > 1 else ''
+        ext_label = ext if ext else '(download attribute set)'
         findings.append({
             'severity': 'MEDIUM',
             'category': 'HTML',
-            'title': 'Suspicious executable download link',
+            'title': f'Executable file download link: {ext_label}',
             'description': (
-                f'A link points to a file with a potentially executable extension '
-                f'({ext if ext else "download attribute set"}). '
-                'Such links may be used to distribute malware to visitors.'
+                f'A link on this page points to a file with an executable extension ({ext_label}). '
+                'Malware delivery campaigns (SocGholish, ClearFake, ClickFix) frequently use '
+                'download links to .exe, .msi, .ps1, .bat, and .hta files as the final payload '
+                'delivery step — the visitor is told the file is a browser update, security tool, '
+                'or required software. '
+                'Evaluate whether the download is expected given the page\'s stated purpose.'
             ),
             'evidence': f'href="{href}"{count_note}',
         })
@@ -337,13 +482,17 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
         findings.append({
             'severity': 'MEDIUM',
             'category': 'JavaScript',
-            'title': 'Inline script dominates page content',
+            'title': 'Page is primarily an inline script delivery vehicle',
             'description': (
-                f'Total inline script content ({total_inline_script_size} bytes) is more than 3x '
-                f'the non-script HTML content ({non_script_size} bytes). '
-                'Page is primarily a script delivery vehicle — typical of obfuscated attack pages.'
+                f'Total inline JavaScript ({total_inline_script_size} bytes) is more than 3× '
+                f'the structural HTML content ({non_script_size} bytes). '
+                'Legitimate web pages serve content with scripting as enhancement; this ratio '
+                'indicates the opposite — the "page" exists mainly to deliver script. '
+                'This is a common characteristic of obfuscated attack pages: phishing kits, '
+                'SocGholish injections, and cryptominer landing pages typically have a minimal '
+                'HTML wrapper with large embedded payloads.'
             ),
-            'evidence': f'Inline JS: {total_inline_script_size}B, Non-script HTML: {non_script_size}B',
+            'evidence': f'Inline JS: {total_inline_script_size}B | Non-script HTML: {non_script_size}B | Ratio: {total_inline_script_size // max(non_script_size, 1)}×',
         })
 
     # ------------------------------------------------------------------
@@ -557,10 +706,15 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
             'category': 'HTML',
             'title': f'Resources loaded from IPFS gateway ({len(ipfs_urls)} found)',
             'description': (
-                'Page loads content from IPFS (InterPlanetary File System) gateways. '
-                'IPFS content is addressed by hash and cannot be taken down by contacting a host, '
-                'making it increasingly popular for hosting phishing kits, malicious scripts, '
-                'and crypto drainer pages that survive domain seizures and takedown requests.'
+                'This page loads content from IPFS (InterPlanetary File System) gateways. '
+                'IPFS content is addressed by cryptographic hash and is immutable — it cannot be '
+                'taken down by contacting a hosting provider or registrar, making it a preferred '
+                'delivery infrastructure for threat actors who need takedown resistance. '
+                'IPFS phishing domains increased 215% between January and August 2024 (Bolster AI). '
+                'Common uses: phishing kits that survive domain seizures, crypto wallet drainer '
+                'scripts, and malicious overlays on compromised pages. '
+                'Legitimate sites have very limited reasons to load content from IPFS gateways '
+                '(some NFT/Web3 platforms are the exception).'
             ),
             'evidence': '\n'.join(ipfs_urls[:10]),
         })
@@ -612,7 +766,96 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
         })
 
     # ------------------------------------------------------------------
-    # 18. Fake CAPTCHA / ClickFix social engineering  (was 17)
+    # 18. External script from unknown domain (staged WordPress injection)
+    # ------------------------------------------------------------------
+    # Finds <script src="..."> tags loading from external domains not in the
+    # known-good list.  When the same domain also appears in a
+    # <link rel="dns-prefetch"> in the same page, the severity is HIGH —
+    # the attacker pre-staged the connection, reducing latency for the
+    # payload.  This is the exact pattern used in the cloudretouch.com
+    # compromise: pacificbirdstudies.com was both dns-prefetched AND used
+    # as the script src, with the tag disguised as bootstrap.bundle.min.js.
+    #
+    # Distinct from the SRI check (LOW for all missing SRI) — this check
+    # specifically flags unknown external origins at a useful severity.
+
+    dns_prefetch_domains: set[str] = set()
+    for _link_tag in soup.find_all('link', rel=True):
+        _rel = _link_tag.get('rel', [])
+        if isinstance(_rel, str):
+            _rel = [_rel]
+        if 'dns-prefetch' in [r.lower() for r in _rel]:
+            _href = _link_tag.get('href', '').strip()
+            # dns-prefetch hrefs are usually protocol-relative (//domain.com)
+            _href_norm = _href.lstrip('/')
+            if _href_norm:
+                if not _href_norm.startswith('http'):
+                    _href_norm = 'https://' + _href_norm
+                _dom = _registrable_domain(_href_norm)
+                if _dom:
+                    dns_prefetch_domains.add(_dom)
+
+    injected_unknown_scripts: list[tuple[str, str]] = []  # (src_url, registrable_domain)
+    for _tag in soup.find_all('script', src=True):
+        _src = _tag.get('src', '')
+        if not _src.startswith('http'):
+            continue
+        if not _is_external(_src, page_url):
+            continue
+        if is_known_good(_src):
+            continue
+        _src_dom = _registrable_domain(_src)
+        if not _tag.get('integrity'):  # SRI check already fires LOW — only add this when no SRI
+            injected_unknown_scripts.append((_src, _src_dom))
+
+    if injected_unknown_scripts:
+        pre_staged = [(u, d) for u, d in injected_unknown_scripts if d in dns_prefetch_domains]
+        not_staged = [(u, d) for u, d in injected_unknown_scripts if d not in dns_prefetch_domains]
+
+        if pre_staged:
+            findings.append({
+                'severity': 'HIGH',
+                'category': 'HTML',
+                'title': f'External script injection from unknown domain — DNS pre-staged ({len(pre_staged)} found)',
+                'description': (
+                    'Script(s) are loaded from external domains not in the known-good list, '
+                    'and the same domain(s) are pre-staged via <link rel="dns-prefetch">. '
+                    'Deliberately pre-fetching a malicious domain reduces load latency and is '
+                    'a deliberate preparation step — characteristic of automated WordPress '
+                    'compromise tools (WPCode injections, malicious plugin backdoors). '
+                    'The combination of dns-prefetch + unknown script src is a strong indicator '
+                    'of an injected malicious payload.'
+                ),
+                'evidence': '\n'.join(
+                    f'<script src="{u}">  [same domain in dns-prefetch: {d}]'
+                    for u, d in pre_staged[:5]
+                ),
+            })
+
+        if not_staged:
+            findings.append({
+                'severity': 'MEDIUM',
+                'category': 'HTML',
+                'title': f'External script from unknown domain ({len(not_staged)} found)',
+                'description': (
+                    'Script(s) are loaded from external domains not in the known-good list. '
+                    'Unlike CDN or analytics scripts, these domains have no recognised legitimate '
+                    'purpose. May be a legitimate third-party integration or a maliciously '
+                    'injected script — investigate the source domain.'
+                ),
+                'evidence': '\n'.join(
+                    f'<script src="{u}">'
+                    for u, d in not_staged[:5]
+                ),
+            })
+
+    # ------------------------------------------------------------------
+    # 19. Shell commands in HTML attributes / hidden elements (ClickFix payload storage)
+    # ------------------------------------------------------------------
+    findings.extend(_check_shell_commands_in_html(soup))
+
+    # ------------------------------------------------------------------
+    # 20. Fake CAPTCHA / ClickFix social engineering UI text
     # ------------------------------------------------------------------
     full_page_text = soup.get_text(separator=' ', strip=True)
     captcha_m = _CLICKFIX_CAPTCHA_RE.search(full_page_text)

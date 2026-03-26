@@ -243,10 +243,14 @@ def analyse_domain(url: str) -> list[dict]:
         findings.append({
             'severity': 'MEDIUM',
             'category': 'Domain',
-            'title': f'High-risk TLD detected: .{last_tld}',
+            'title': f'High-risk TLD: .{last_tld}',
             'description': (
-                f'The domain uses the .{last_tld} TLD, which has historically high rates of '
-                'malware, phishing, and spam. Free or low-cost TLDs are frequently abused.'
+                f'The .{last_tld} TLD has disproportionately high rates of malicious registration. '
+                'These TLDs are typically free or extremely cheap, lowering the barrier for threat '
+                'actors who register large numbers of domains for phishing campaigns, malware C2, '
+                'and spam infrastructure — then abandon them. '
+                'This finding alone is not conclusive; it is most significant when combined with '
+                'brand impersonation, external form actions, or malicious JavaScript signals.'
             ),
             'evidence': f'Domain: {sld}.{tld} | TLD: .{last_tld}',
         })
@@ -311,11 +315,16 @@ def analyse_domain(url: str) -> list[dict]:
                     findings.append({
                         'severity': 'CRITICAL',
                         'category': 'Domain',
-                        'title': f'Brand impersonation in subdomain: "{brand}"',
+                        'title': f'Brand impersonation via subdomain: "{brand}"',
                         'description': (
-                            f'The subdomain contains the brand name "{brand}" but the registrable domain '
-                            f'is "{sld}.{tld}", not the legitimate {brand} domain. '
-                            'This is a classic phishing technique to make URLs appear legitimate.'
+                            f'The hostname uses "{brand}" in the subdomain position '
+                            f'on a non-brand registrable domain ("{sld}.{tld}"). '
+                            'This is a well-established phishing technique: the brand name in the '
+                            'leftmost part of the URL is what users scan when checking if a link '
+                            'is legitimate. Attackers deliberately exploit this scanning pattern '
+                            f'— a visitor glancing at "{hostname}" may perceive it as an official '
+                            f'{brand} URL without reading the full domain. '
+                            f'The legitimate {brand} service uses: {legitimate_slds_str}'
                         ),
                         'evidence': (
                             f'[Hostname decomposition]\n'
@@ -381,13 +390,17 @@ def analyse_domain(url: str) -> list[dict]:
                 findings.append({
                     'severity': 'HIGH',
                     'category': 'Domain',
-                    'title': f'Brand keyword "{brand}" in non-brand registered domain',
+                    'title': f'Brand keyword "{brand}" in registered domain (not the real {brand})',
                     'description': (
-                        f'The registered domain "{sld}.{tld}" contains the brand keyword "{brand}" '
-                        f'but is not the legitimate {brand} domain. '
-                        'Common typosquatting/phishing technique.'
+                        f'The registered domain "{sld}.{tld}" contains "{brand}" but is not the '
+                        f'legitimate {brand} service. Attackers register domains like '
+                        f'"paypal-secure.com" or "microsoft-support.net" to pass cursory URL '
+                        'inspection — victims see the brand name and assume it is legitimate. '
+                        'This is distinct from subdomain impersonation: here the attacker owns '
+                        'the registrable domain itself, making the impersonation more convincing '
+                        'and more expensive (requiring domain registration rather than a free subdomain).'
                     ),
-                    'evidence': f'Domain: {sld}.{tld} | Brand keyword found: "{brand}"',
+                    'evidence': f'Domain: {sld}.{tld} | Brand keyword: "{brand}" | This is not an official {brand} domain',
                 })
                 break  # One finding per domain is sufficient
 

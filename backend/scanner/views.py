@@ -7,6 +7,7 @@ import time
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db.models import OuterRef, Subquery
 from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views import View
 from rest_framework import status
@@ -184,10 +185,16 @@ class ScanStreamView(View):
                         job.delete()
                     return
 
-                # Still running — emit status update
+                # Still running — emit status update with incremental progress
+                progress = (job.scan_metadata or {}).get('_progress', {})
                 yield _sse_event('status_update', json.dumps({
                     'status': job.status,
                     'id': str(job.id),
+                    'step': progress.get('step', 0),
+                    'total_steps': progress.get('total_steps', 6),
+                    'label': progress.get('label', ''),
+                    'current_url': progress.get('current_url', ''),
+                    'findings_count': progress.get('findings_count', 0),
                 }))
 
                 time.sleep(2)
@@ -210,8 +217,9 @@ class ScanHistoryView(APIView):
     """
     GET /api/history/?q=<search>&page=<n>
 
-    Returns a paginated list of completed (and failed) scans, newest first.
-    Optional ?q= filters by URL substring (domain search).
+    Returns a deduplicated paginated list — one entry per unique URL,
+    showing the most recent scan for each URL.
+    Optional ?q= filters by URL substring.
     Page size: 20. Returns {count, page, total_pages, results}.
     """
     throttle_scope = 'scan_status'
@@ -225,14 +233,66 @@ class ScanHistoryView(APIView):
         except (ValueError, TypeError):
             page = 1
 
-        qs = ScanJob.objects.filter(
+        # Subquery: for each URL, find the most recent non-pending scan's id.
+        # This deduplicates the list so each URL appears only once (latest scan).
+        latest_per_url = ScanJob.objects.filter(
+            url=OuterRef('url'),
             cached_from__isnull=True,
-        ).exclude(status=ScanJob.Status.PENDING).exclude(
-            status=ScanJob.Status.RUNNING,
+        ).exclude(
+            status__in=[ScanJob.Status.PENDING, ScanJob.Status.RUNNING],
+        ).order_by('-created_at').values('id')[:1]
+
+        qs = ScanJob.objects.filter(
+            id=Subquery(latest_per_url),
         ).order_by('-created_at')
 
         if q:
             qs = qs.filter(url__icontains=q)
+
+        total = qs.count()
+        total_pages = max(1, (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        page = min(page, total_pages)
+        offset = (page - 1) * self.PAGE_SIZE
+        results = qs[offset: offset + self.PAGE_SIZE]
+
+        serializer = ScanJobSummarySerializer(results, many=True)
+        return Response({
+            'count': total,
+            'page': page,
+            'total_pages': total_pages,
+            'results': serializer.data,
+        })
+
+
+class ScanUrlHistoryView(APIView):
+    """
+    GET /api/scan/{id}/url-history/?page=<n>
+
+    Returns paginated previous scans of the same URL as the given scan,
+    excluding the current scan, newest first. Page size: 10.
+    Returns {count, page, total_pages, results}.
+    """
+    throttle_scope = 'scan_status'
+
+    PAGE_SIZE = 10
+
+    def get(self, request: HttpRequest, scan_id: str) -> Response:
+        try:
+            job = ScanJob.objects.get(id=scan_id)
+        except (ScanJob.DoesNotExist, ValueError):
+            return Response({'error': 'Scan not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            page = max(1, int(request.GET.get('page', 1)))
+        except (ValueError, TypeError):
+            page = 1
+
+        qs = ScanJob.objects.filter(
+            url=job.url,
+            cached_from__isnull=True,
+        ).exclude(id=scan_id).exclude(
+            status__in=[ScanJob.Status.PENDING, ScanJob.Status.RUNNING],
+        ).order_by('-created_at')
 
         total = qs.count()
         total_pages = max(1, (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)

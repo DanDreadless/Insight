@@ -107,22 +107,37 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
 
     synthetic: list[dict] = []
 
-    # Context 1: High-risk TLD + missing all security headers + external form action
+    # Context 1: High-risk TLD + external form action (phishing infrastructure)
+    # Missing security headers are INFO-level individually but in this combination
+    # they provide additional signal that the site was stood up quickly by a threat
+    # actor rather than by a developer who'd add standard security hardening.
     has_highrisk_tld = _has_title_fragment('high-risk tld')
-    has_external_form = _has_title_fragment('form submits to external')
+    has_external_form = _has_title_fragment('form submits') and _has_title_fragment('external')
     missing_headers_count = sum(1 for f in findings if 'Missing' in f.get('title', '') and f.get('category') == 'Headers')
-    if has_highrisk_tld and has_external_form and missing_headers_count >= 2:
+    if has_highrisk_tld and has_external_form:
         if not any(f.get('title') == 'Context collapse: phishing infrastructure' for f in findings):
+            header_note = (
+                f' Combined with {missing_headers_count} absent security header(s) '
+                '(typical of hastily deployed phishing pages), this pattern is consistent '
+                'with commodity phishing kit infrastructure.'
+                if missing_headers_count >= 1 else
+                ' This combination is a core phishing infrastructure pattern.'
+            )
             synthetic.append({
                 'severity': 'HIGH',
                 'category': 'Threat',
                 'title': 'Context collapse: phishing infrastructure',
                 'description': (
-                    'Multiple independent signals converge: high-risk TLD, external form action, '
-                    f'and {missing_headers_count} missing security headers. '
-                    'Individually moderate findings — together they strongly indicate phishing infrastructure.'
+                    'Two converging signals indicate phishing infrastructure: a high-risk TLD '
+                    '(disproportionately abused for phishing) combined with a form that submits '
+                    'credentials to an external domain (the attacker\'s collection server). '
+                    + header_note + ' '
+                    'Legitimate websites on high-risk TLDs rarely submit login forms to a different domain.'
                 ),
-                'evidence': 'High-risk TLD + external form action + missing security headers',
+                'evidence': (
+                    f'High-risk TLD + external form action'
+                    + (f' + {missing_headers_count} missing security header(s)' if missing_headers_count >= 1 else '')
+                ),
             })
 
     # Context 2: DGA domain + hidden iframe + obfuscated JS
@@ -146,7 +161,7 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
     # Context 3: Brand impersonation + new cert + phishing form
     has_brand_impersonation = _has_title_fragment('brand impersonation') or _has_title_fragment('brand keyword')
     has_new_cert = _has_title_fragment('recently') and _has_category('SSL')
-    has_phishing_form = _has_title_fragment('form submits to external') or _has_title_fragment('phishing')
+    has_phishing_form = (_has_title_fragment('form submits') and _has_title_fragment('external')) or _has_title_fragment('phishing')
     if has_brand_impersonation and has_phishing_form:
         if not any(f.get('title') == 'Context collapse: active phishing campaign' for f in findings):
             synthetic.append({
@@ -221,6 +236,44 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
                     'the clipboard while the user is socially engineered into pasting and running it, '
                     'bypassing all browser security controls. One of the most active initial-access '
                     'delivery techniques in 2024–2025.'
+                ),
+                'evidence': evidence_block,
+            })
+
+    # Context 6: Injected external script + clipboard write or ClickFix content
+    # Covers the compromised-legitimate-site pattern (e.g. WordPress compromise):
+    # - An unknown external script is injected into the page (Fix 1 in html_analyser)
+    # - That script delivers a ClickFix payload (clipboard write / fake CAPTCHA)
+    # Either combination confirms the site is actively delivering malware to visitors.
+    has_injected_script = _has_title_fragment('external script injection from unknown domain')
+    has_clickfix_payload = (
+        _has_title_fragment('clickfix clipboard payload')
+        or _has_title_fragment('fake captcha')
+        or _has_title_fragment('clipboard write outside')
+    )
+    if has_injected_script and has_clickfix_payload:
+        if not any(f.get('title') == 'Context collapse: compromised site delivering ClickFix malware' for f in findings):
+            trigger_parts: list[str] = []
+            for f in findings:
+                title = f.get('title', '').lower()
+                if any(kw in title for kw in ('external script injection', 'clickfix', 'fake captcha', 'clipboard write outside')):
+                    label = f.get('title', '')
+                    ev = f.get('evidence', '').strip()
+                    trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
+            evidence_block = '\n\n'.join(trigger_parts) if trigger_parts else (
+                'Injected unknown external script + ClickFix/clipboard payload detected'
+            )
+            synthetic.append({
+                'severity': 'CRITICAL',
+                'category': 'Threat',
+                'title': 'Context collapse: compromised site delivering ClickFix malware',
+                'description': (
+                    'A script injected from an unknown external domain is delivering a ClickFix '
+                    'payload on this page. This is the signature of a compromised legitimate website '
+                    '(commonly WordPress) where an attacker has injected a malicious script tag that '
+                    'dynamically displays a fake CAPTCHA and writes a shell command to the clipboard. '
+                    'Visitors are socially engineered into pasting and executing the command. '
+                    'The legitimate site owner is almost certainly unaware of the compromise.'
                 ),
                 'evidence': evidence_block,
             })

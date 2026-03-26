@@ -513,8 +513,16 @@ def _check_form_hijacking(js: str) -> list[dict]:
         return findings
 
     prevent_m = re.search(r'preventDefault\s*\(\s*\)', js, re.IGNORECASE)
+    # Require an explicit hardcoded external URL in the network call.
+    # Legitimate AJAX form plugins (CF7, Gravity Forms, WPForms) compute their
+    # endpoint dynamically from window.location — they never hardcode an exfil URL.
+    # Real credential harvesters always hardcode their destination: fetch('https://evil.com/...')
     exfil_m = re.search(
-        r'(?:fetch\s*\(|XMLHttpRequest|sendBeacon\s*\()',
+        r'(?:'
+        r'fetch\s*\(\s*["\'\`]https?://'           # fetch('https://...')
+        r'|\.open\s*\(\s*["\'][A-Z]+["\']\s*,\s*["\']https?://'  # xhr.open('POST','https://...')
+        r'|sendBeacon\s*\(\s*["\'\`]https?://'     # sendBeacon('https://...')
+        r')',
         js, re.IGNORECASE
     )
 
@@ -988,15 +996,56 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
     if not m:
         return findings
 
-    # Determine whether this write is user-triggered or autonomous.
+    # --- Check 1: Is the clipboard payload itself a shell command? -----------
+    # ClickFix writes PowerShell/cmd payloads inside click handlers on fake
+    # CAPTCHA buttons.  A click handler alone does NOT make a clipboard write
+    # legitimate — we must inspect what is actually being written.
+    # Check both: string literal argument AND any high-risk strings in the 2KB
+    # surrounding the call (covers the variable-assignment pattern).
+    _SHELL_CMD_RE = re.compile(
+        r'powershell|mshta\.exe|mshta\b|cmd\.exe|rundll32|regsvr32|'
+        r'wscript|cscript|invoke-expression|\biex\b|invoke-restmethod|\birm\b|'
+        r'base64\s+-d|\|\s*bash|\|\s*sh\b|'
+        r'curl\b.{0,40}https?://|wget\b.{0,40}https?://',
+        re.IGNORECASE,
+    )
+
+    # Try literal string argument first (most reliable)
+    write_arg_m = re.search(
+        r'navigator\.clipboard\.writeText\s*\(\s*["\']([^"\']{10,})["\']',
+        js, re.IGNORECASE,
+    )
+    # Also scan 2KB around the call for shell-command strings — covers variable pattern
+    call_region = js[max(0, m.start() - 500):min(len(js), m.end() + 1500)]
+
+    shell_in_arg = bool(write_arg_m and _SHELL_CMD_RE.search(write_arg_m.group(1)))
+    shell_in_region = bool(_SHELL_CMD_RE.search(call_region))
+
+    if shell_in_arg or shell_in_region:
+        payload_evidence = (
+            f'[Clipboard payload — literal argument]\n{write_arg_m.group(1)[:500]}'
+            if write_arg_m else
+            f'[Shell command indicator near writeText() call]\n{_snippet(js, m)}'
+        )
+        findings.append({
+            'severity': 'CRITICAL',
+            'category': 'JavaScript',
+            'title': 'ClickFix clipboard payload — shell command written to clipboard',
+            'description': (
+                'navigator.clipboard.writeText() is called with a value containing shell command '
+                'indicators (PowerShell, cmd.exe, mshta, etc.). This is the ClickFix technique: '
+                'a malicious command is placed in the clipboard while the user is socially '
+                'engineered into pasting and executing it via a fake CAPTCHA or verification prompt. '
+                'The click-handler context is irrelevant — the content itself is malicious.'
+            ),
+            'evidence': payload_evidence,
+        })
+        return findings  # CRITICAL already emitted — skip INFO/MEDIUM below
+
+    # --- Check 2: Is the write user-triggered (heuristic)? ------------------
     # Legitimate "copy to clipboard" buttons are inside click/event handlers.
     # Malicious clipboard hijackers fire on page load or in setInterval — not
     # in direct response to a user gesture.
-    #
-    # Strategy: check 1000 chars before the call for a click handler, and also
-    # look for copy-intent naming in surrounding context (function name, callback
-    # name, variable name) — "showCopied", "handleCopy", "copyToClipboard" etc.
-    # are unambiguous signals of a user-triggered copy button.
     context_start = max(0, m.start() - 1000)
     context_end = min(len(js), m.end() + 200)
     surrounding_before = js[context_start:m.start()]
@@ -1106,6 +1155,12 @@ def _check_shell_dropper(js: str) -> list[dict]:
     has_iex = bool(re.search(r'\|\s*(?:iex|Invoke-Expression)\b', js, re.IGNORECASE))
     is_ps_dropper = has_ps_fetcher and has_iex
 
+    # PowerShell download-and-execute: Invoke-WebRequest -OutFile <path> + Start-Process/Invoke-Item
+    # This pattern writes an exe to disk then runs it — no pipe-to-iex required.
+    has_outfile = bool(re.search(r'-OutFile\b', js, re.IGNORECASE))
+    has_ps_execute = bool(re.search(r'\b(?:Start-Process|Invoke-Item)\b', js, re.IGNORECASE))
+    is_ps_download_exec = has_ps_fetcher and has_outfile and has_ps_execute
+
     # curl/wget to a bare IP — bounded `[^\s"'<>{};]{0,40}` avoids backtracking
     curl_ip_m = re.search(
         r'(?:curl|wget)\b[^\s"\'<>{};]{0,40}https?://(\d{1,3}(?:\.\d{1,3}){3})/',
@@ -1120,6 +1175,8 @@ def _check_shell_dropper(js: str) -> list[dict]:
     pipe_shell_m = re.search(r'\|\s*(?:ba?sh|zsh|ash)\b', js, re.IGNORECASE)
     ps_fetch_m = re.search(r'\b(?:irm|iwr|Invoke-RestMethod|Invoke-WebRequest)\b', js, re.IGNORECASE)
     iex_m = re.search(r'\|\s*(?:iex|Invoke-Expression)\b', js, re.IGNORECASE)
+    outfile_m = re.search(r'-OutFile\b', js, re.IGNORECASE)
+    ps_exec_m = re.search(r'\b(?:Start-Process|Invoke-Item)\b', js, re.IGNORECASE)
 
     # --- Emit findings ---
 
@@ -1171,6 +1228,29 @@ def _check_shell_dropper(js: str) -> list[dict]:
                 'script is fetched and immediately executed in memory, leaving no file on disk.'
             ),
             'evidence': '\n\n'.join(evidence_parts) if evidence_parts else 'Invoke-RestMethod/irm + Invoke-Expression/iex signals detected',
+        })
+
+    if is_ps_download_exec:
+        evidence_parts = []
+        if ps_fetch_m:
+            evidence_parts.append(f'[PowerShell download command]\n{_snippet(js, ps_fetch_m)}')
+        if outfile_m:
+            evidence_parts.append(f'[-OutFile write-to-disk]\n{_snippet(js, outfile_m)}')
+        if ps_exec_m:
+            evidence_parts.append(f'[Execution command]\n{_snippet(js, ps_exec_m)}')
+        findings.append({
+            'severity': 'CRITICAL',
+            'category': 'JavaScript',
+            'title': 'PowerShell download-and-execute dropper in JavaScript',
+            'description': (
+                'A PowerShell command sequence is embedded in this script that downloads a file '
+                'using `Invoke-WebRequest -OutFile` and immediately executes it with `Start-Process` '
+                'or `Invoke-Item`. This is a disk-based malware delivery technique: the payload is '
+                'written to a temporary path (commonly `$env:TEMP`) and launched as a process, '
+                'bypassing in-memory execution restrictions. Commonly used in ClickFix campaigns '
+                'to deliver info-stealers (Lumma, Vidar) and RATs.'
+            ),
+            'evidence': '\n\n'.join(evidence_parts) if evidence_parts else 'Invoke-WebRequest -OutFile + Start-Process signals detected',
         })
 
     # Only fire bash -c as a standalone finding if the full dropper wasn't already flagged

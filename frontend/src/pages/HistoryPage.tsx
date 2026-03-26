@@ -70,7 +70,7 @@ export default function HistoryPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-white mb-1">Scan History</h1>
         <p className="text-sm" style={{ color: 'rgba(255,255,255,0.4)' }}>
-          All completed scans — search by domain or URL fragment.
+          Most recent scan per URL — search by domain or URL fragment.
         </p>
       </div>
 
@@ -110,7 +110,7 @@ export default function HistoryPage() {
           <p className="text-xs mb-3" style={{ color: 'rgba(255,255,255,0.3)' }}>
             {data.count === 0
               ? 'No scans found.'
-              : `${data.count} scan${data.count !== 1 ? 's' : ''}${query ? ` matching "${query}"` : ''}`}
+              : `${data.count} unique URL${data.count !== 1 ? 's' : ''}${query ? ` matching "${query}"` : ''}`}
           </p>
 
           {/* Table */}

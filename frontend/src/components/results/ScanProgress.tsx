@@ -7,44 +7,40 @@ interface ScanProgressProps {
   onComplete: (scan: ScanJob) => void
 }
 
-const PROGRESS_MESSAGES = [
-  'Connecting to target...',
-  'Fetching target page...',
-  'Collecting resources...',
-  'Analysing JavaScript...',
-  'Checking security headers...',
-  'Analysing domain intelligence...',
-  'Inspecting SSL certificate...',
-  'Checking HTML structure...',
-  'Running threat detectors...',
-  'Finalising results...',
-]
+interface ProgressData {
+  step: number
+  total_steps: number
+  label: string
+  current_url: string
+  findings_count: number
+}
 
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 2000
 
+function truncateUrl(url: string, max = 60): string {
+  if (!url || url.length <= max) return url
+  try {
+    const { hostname, pathname } = new URL(url)
+    const short = `${hostname}${pathname}`
+    return short.length <= max ? short : short.slice(0, max - 1) + '…'
+  } catch {
+    return url.slice(0, max - 1) + '…'
+  }
+}
+
 export default function ScanProgress({ scanId, onComplete }: ScanProgressProps) {
-  const [messageIndex, setMessageIndex] = useState(0)
-  const [statusText, setStatusText] = useState('Pending...')
+  const [progress, setProgress] = useState<ProgressData | null>(null)
+  const [statusText, setStatusText] = useState('PENDING')
   const [error, setError] = useState<string | null>(null)
   const [errorMetadata, setErrorMetadata] = useState<Record<string, unknown> | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
-  const messageTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Track whether a meaningful error was received from a named SSE event so
-  // that es.onerror (which fires after the server closes the stream) does not
-  // trigger a retry or overwrite it with the generic "connection lost" message.
   const namedErrorRef = useRef(false)
 
   useEffect(() => {
-    // Rotate progress messages every 3 seconds
-    messageTimerRef.current = setInterval(() => {
-      setMessageIndex((i) => (i + 1) % PROGRESS_MESSAGES.length)
-    }, 3000)
-
     connect()
-
     return cleanup
   }, [scanId])
 
@@ -58,8 +54,24 @@ export default function ScanProgress({ scanId, onComplete }: ScanProgressProps) 
 
     es.addEventListener('status_update', (e: MessageEvent) => {
       try {
-        const data = JSON.parse(e.data) as { status: string }
+        const data = JSON.parse(e.data) as {
+          status: string
+          step?: number
+          total_steps?: number
+          label?: string
+          current_url?: string
+          findings_count?: number
+        }
         setStatusText(data.status)
+        if (data.step !== undefined && data.step > 0) {
+          setProgress({
+            step: data.step,
+            total_steps: data.total_steps ?? 6,
+            label: data.label ?? '',
+            current_url: data.current_url ?? '',
+            findings_count: data.findings_count ?? 0,
+          })
+        }
       } catch {
         // ignore parse errors
       }
@@ -90,7 +102,6 @@ export default function ScanProgress({ scanId, onComplete }: ScanProgressProps) 
     })
 
     es.onerror = () => {
-      // Named error events are followed by a server-close which fires onerror — ignore those.
       if (namedErrorRef.current) return
 
       es.close()
@@ -110,10 +121,6 @@ export default function ScanProgress({ scanId, onComplete }: ScanProgressProps) 
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
       eventSourceRef.current = null
-    }
-    if (messageTimerRef.current) {
-      clearInterval(messageTimerRef.current)
-      messageTimerRef.current = null
     }
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current)
@@ -178,33 +185,60 @@ export default function ScanProgress({ scanId, onComplete }: ScanProgressProps) 
     )
   }
 
+  const pct = progress ? Math.round((progress.step / progress.total_steps) * 100) : 0
+  const label = progress?.label || (statusText === 'RUNNING' ? 'Starting scan…' : 'Waiting in queue…')
+  const currentUrl = progress?.current_url ?? ''
+  const findingsCount = progress?.findings_count ?? 0
+
   return (
     <div
-      className="rounded-lg border p-8 flex flex-col items-center gap-6"
+      className="rounded-lg border p-8 flex flex-col items-center gap-5"
       style={{ backgroundColor: 'rgba(255,255,255,0.03)', borderColor: 'rgba(255,255,255,0.1)' }}
     >
       <LoadingSpinner size="lg" />
 
-      <div className="text-center">
-        <p className="text-white/90 font-medium mb-1">
-          {PROGRESS_MESSAGES[messageIndex]}
-        </p>
-        <p className="text-white/40 text-sm font-mono">Status: {statusText}</p>
-      </div>
+      {/* Step label */}
+      <p className="text-white/90 font-medium text-center">{label}</p>
 
-      {/* Animated dots */}
-      <div className="flex gap-2">
-        {[0, 1, 2].map((i) => (
+      {/* Progress bar */}
+      <div className="w-full max-w-sm">
+        <div
+          className="w-full rounded-full overflow-hidden"
+          style={{ height: '6px', backgroundColor: 'rgba(255,255,255,0.08)' }}
+        >
           <div
-            key={i}
-            className="w-2 h-2 rounded-full animate-bounce"
+            className="h-full rounded-full transition-all duration-700"
             style={{
+              width: `${pct}%`,
               backgroundColor: '#bd363a',
-              animationDelay: `${i * 0.15}s`,
             }}
           />
-        ))}
+        </div>
+        <div className="flex justify-between mt-1.5">
+          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.3)' }}>
+            {progress ? `Step ${progress.step} of ${progress.total_steps}` : 'Initialising…'}
+          </span>
+          {findingsCount > 0 && (
+            <span
+              className="text-xs font-medium px-2 py-0.5 rounded"
+              style={{ backgroundColor: 'rgba(189,54,58,0.2)', color: '#fca5a5' }}
+            >
+              {findingsCount} finding{findingsCount !== 1 ? 's' : ''} so far
+            </span>
+          )}
+        </div>
       </div>
+
+      {/* Current URL being scanned */}
+      {currentUrl && (
+        <p
+          className="text-xs font-mono text-center max-w-sm truncate"
+          style={{ color: 'rgba(255,255,255,0.35)' }}
+          title={currentUrl}
+        >
+          {truncateUrl(currentUrl)}
+        </p>
+      )}
 
       <p className="text-white/30 text-xs text-center max-w-sm">
         Passively analysing the target URL for threats. This typically takes 15–60 seconds.

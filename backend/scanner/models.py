@@ -34,6 +34,7 @@ class ScanJob(models.Model):
     scan_metadata = models.JSONField(default=dict)
     content_hash = models.CharField(max_length=64, blank=True, db_index=True)
     last_scanned_at = models.DateTimeField(null=True, blank=True)
+    detection_engine_version = models.IntegerField(default=0)
     cached_from = models.ForeignKey(
         'self',
         null=True,
