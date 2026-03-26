@@ -136,3 +136,4 @@ secrets.toml
 # Claude Code
 CLAUDE.md
 .claude/
+docs/

@@ -103,8 +103,8 @@ export default function HomePage() {
         <h1 className="text-4xl sm:text-5xl font-bold text-white mb-3 leading-tight">
           Threats hide in plain sight.
         </h1>
-        <p className="text-4xl sm:text-5xl font-bold mb-4 leading-tight" style={{ color: '#bd363a' }}>
-          Insight finds them.
+        <p className="text-4xl sm:text-5xl font-bold mb-4 text-white leading-tight">
+          <span style={{ color: '#bd363a' }}>Insight</span> finds them.
         </p>
         <p className="text-white/60 text-lg max-w-2xl mx-auto mb-8 leading-relaxed">
           Reads what's actually on the page.<br />
