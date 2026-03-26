@@ -52,6 +52,14 @@ export async function getScanUrlHistory(scanId: string, page?: number): Promise<
   return response.data
 }
 
+export async function submitFeedback(
+  scanId: string,
+  reason: string,
+  note: string,
+): Promise<void> {
+  await apiClient.post(`/scan/${scanId}/feedback/`, { reason, note })
+}
+
 export async function getScanSource(scanId: string, url?: string): Promise<string> {
   const params = url ? { url } : {}
   const response = await apiClient.get<string>(`/scan/${scanId}/source/`, {

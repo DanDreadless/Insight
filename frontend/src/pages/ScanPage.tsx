@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { getScan, getScanUrlHistory } from '../api/api'
+import { getScan, getScanUrlHistory, submitFeedback } from '../api/api'
 import type { HistoryResponse, ScanSummary } from '../api/api'
 import type { ScanJob } from '../types'
 import ScanProgress from '../components/results/ScanProgress'
@@ -132,6 +132,124 @@ function PreviousScans({ scanId }: { scanId: string }) {
         </>
       )}
     </section>
+  )
+}
+
+const FEEDBACK_REASONS = [
+  { value: 'false_positive', label: 'False Positive — result flagged something that is not a threat' },
+  { value: 'missed_threat', label: 'Missed Threat — result missed something that is clearly malicious' },
+  { value: 'wrong_severity', label: 'Wrong Severity — finding is real but rated at the wrong level' },
+  { value: 'other', label: 'Other' },
+]
+
+function FeedbackModal({ scanId, onClose }: { scanId: string; onClose: () => void }) {
+  const [reason, setReason] = useState('')
+  const [note, setNote] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [done, setDone] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit() {
+    if (!reason) { setError('Please select a reason.'); return }
+    setSubmitting(true)
+    setError('')
+    try {
+      await submitFeedback(scanId, reason, note)
+      setDone(true)
+    } catch {
+      setError('Submission failed. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div
+        className="w-full max-w-md rounded-lg p-6"
+        style={{ backgroundColor: '#2a3238', border: '1px solid rgba(255,255,255,0.12)' }}
+      >
+        {done ? (
+          <div className="text-center py-4">
+            <p className="text-green-400 font-semibold mb-2">Feedback submitted</p>
+            <p className="text-white/50 text-sm mb-4">
+              Thanks — this scan has been queued for detection engineering review.
+            </p>
+            <button
+              onClick={onClose}
+              className="text-sm px-4 py-2 rounded text-white"
+              style={{ backgroundColor: '#bd363a' }}
+            >
+              Close
+            </button>
+          </div>
+        ) : (
+          <>
+            <h3 className="text-white font-semibold mb-1">Report Incorrect Results</h3>
+            <p className="text-white/40 text-xs mb-4">
+              This scan will be queued for detection engineering review. Your feedback
+              helps reduce false positives and improve detection accuracy.
+            </p>
+
+            <label className="block text-white/60 text-xs mb-1">Reason</label>
+            <select
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              className="w-full rounded px-3 py-2 text-sm mb-3"
+              style={{
+                backgroundColor: '#353E43',
+                border: '1px solid rgba(255,255,255,0.15)',
+                color: reason ? '#fff' : 'rgba(255,255,255,0.35)',
+              }}
+            >
+              <option value="" disabled>Select a reason…</option>
+              {FEEDBACK_REASONS.map((r) => (
+                <option key={r.value} value={r.value} style={{ color: '#fff' }}>{r.label}</option>
+              ))}
+            </select>
+
+            <label className="block text-white/60 text-xs mb-1">Additional notes <span className="text-white/25">(optional)</span></label>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={1000}
+              rows={3}
+              placeholder="e.g. This is a known CDN. The flagged script is jQuery served from cdnjs."
+              className="w-full rounded px-3 py-2 text-sm resize-none mb-3"
+              style={{
+                backgroundColor: '#353E43',
+                border: '1px solid rgba(255,255,255,0.15)',
+                color: '#fff',
+              }}
+            />
+
+            {error && <p className="text-red-400 text-xs mb-3">{error}</p>}
+
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={onClose}
+                className="text-sm px-4 py-2 rounded"
+                style={{ color: 'rgba(255,255,255,0.4)', border: '1px solid rgba(255,255,255,0.1)' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmit}
+                disabled={submitting}
+                className="text-sm px-4 py-2 rounded font-medium text-white disabled:opacity-50"
+                style={{ backgroundColor: '#bd363a' }}
+              >
+                {submitting ? 'Submitting…' : 'Submit Feedback'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -276,6 +394,8 @@ export default function ScanPage() {
   }
 
   // Complete
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
+
   const SEVERITY_RANK: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 }
   const findings = [...(scan.findings ?? [])].sort(
     (a, b) => (SEVERITY_RANK[a.severity] ?? 4) - (SEVERITY_RANK[b.severity] ?? 4)
@@ -391,8 +511,8 @@ export default function ScanPage() {
       {/* Previous scans of this URL */}
       <PreviousScans scanId={id} />
 
-      {/* Footer action */}
-      <div className="mt-8 text-center">
+      {/* Footer actions */}
+      <div className="mt-8 flex flex-col items-center gap-3">
         <Link
           to="/"
           className="inline-block text-sm px-6 py-3 rounded-lg font-semibold text-white transition-all"
@@ -402,7 +522,20 @@ export default function ScanPage() {
         >
           Scan another URL
         </Link>
+        <button
+          onClick={() => setFeedbackOpen(true)}
+          className="text-xs transition-colors"
+          style={{ color: 'rgba(255,255,255,0.25)' }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)' }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.25)' }}
+        >
+          Results seem incorrect? Report for review
+        </button>
       </div>
+
+      {feedbackOpen && id && (
+        <FeedbackModal scanId={id} onClose={() => setFeedbackOpen(false)} />
+      )}
     </div>
   )
 }

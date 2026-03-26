@@ -84,3 +84,34 @@ class Finding(models.Model):
 
     def __str__(self) -> str:
         return f'Finding({self.severity}, {self.title})'
+
+
+class ScanFeedback(models.Model):
+    class Reason(models.TextChoices):
+        FALSE_POSITIVE = 'false_positive', 'False Positive'
+        MISSED_THREAT = 'missed_threat', 'Missed Threat'
+        WRONG_SEVERITY = 'wrong_severity', 'Wrong Severity'
+        OTHER = 'other', 'Other'
+
+    scan = models.ForeignKey(
+        ScanJob,
+        related_name='feedback',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    url = models.URLField(max_length=2048)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reason = models.CharField(max_length=20, choices=Reason.choices)
+    note = models.TextField(blank=True)
+    actual_verdict = models.CharField(max_length=10)
+    expected_verdict = models.CharField(max_length=10, blank=True)
+    findings_snapshot = models.JSONField(default=list)
+    resolved = models.BooleanField(default=False)
+    submitter_ip = models.GenericIPAddressField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-submitted_at']
+
+    def __str__(self) -> str:
+        return f'ScanFeedback({self.pk}, {self.reason}, {self.url[:60]})'

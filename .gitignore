@@ -137,3 +137,6 @@ secrets.toml
 CLAUDE.md
 .claude/
 docs/
+
+# Feedback / detection engineering test cases (gitignored — local dev only)
+backend/feedback/

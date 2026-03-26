@@ -14,7 +14,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import ScanJob
+from .models import ScanFeedback, ScanJob
 from .serializers import ScanJobSerializer, ScanJobSummarySerializer, ScanSubmitSerializer
 from .tasks import run_scan
 from .modules.fetcher import fetch, FetchError
@@ -307,6 +307,63 @@ class ScanUrlHistoryView(APIView):
             'total_pages': total_pages,
             'results': serializer.data,
         })
+
+
+class FeedbackSubmitView(APIView):
+    """
+    POST /api/scan/{id}/feedback/
+
+    Submits user feedback on a completed scan result for detection engineering review.
+    Stores a snapshot of the findings at submission time so the case is self-contained
+    even if the scan record is later cleaned up.
+
+    Body: { "reason": "false_positive|missed_threat|wrong_severity|other", "note": "..." }
+    """
+    throttle_scope = 'scan_status'
+
+    def post(self, request: HttpRequest, scan_id: str) -> Response:
+        try:
+            job = ScanJob.objects.prefetch_related('findings').get(id=scan_id)
+        except (ScanJob.DoesNotExist, ValueError):
+            return Response({'error': 'Scan not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if job.status != ScanJob.Status.COMPLETE:
+            return Response({'error': 'Feedback can only be submitted for completed scans.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        reason = str(request.data.get('reason', '')).strip()
+        valid_reasons = [r.value for r in ScanFeedback.Reason]
+        if reason not in valid_reasons:
+            return Response(
+                {'error': f'reason must be one of: {valid_reasons}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        note = str(request.data.get('note', '')).strip()[:1000]
+
+        findings_snapshot = [
+            {
+                'severity': f.severity,
+                'category': f.category,
+                'title': f.title,
+                'description': f.description,
+                'evidence': f.evidence,
+                'resource_url': f.resource_url,
+            }
+            for f in job.findings.all()
+        ]
+
+        ScanFeedback.objects.create(
+            scan=job,
+            url=job.url,
+            reason=reason,
+            note=note,
+            actual_verdict=job.verdict,
+            findings_snapshot=findings_snapshot,
+            submitter_ip=_get_client_ip(request),
+        )
+
+        logger.info('Feedback submitted: scan=%s reason=%s ip=%s', scan_id, reason, _get_client_ip(request))
+        return Response({'status': 'submitted'}, status=status.HTTP_201_CREATED)
 
 
 def _sse_event(event_type: str, data: str) -> str:
