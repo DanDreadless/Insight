@@ -93,15 +93,19 @@ def detect_technologies(
     html: str,
     headers: dict,
     resources: dict,
+    whois_data: dict | None = None,
 ) -> list[dict]:
     """
     Detect technologies used by a page from its HTML, headers, and resources.
 
     Parameters
     ----------
-    html      : decoded page HTML
-    headers   : HTTP response headers dict
-    resources : output of resource_collector.collect_resources()
+    html       : decoded page HTML
+    headers    : HTTP response headers dict
+    resources  : output of resource_collector.collect_resources()
+    whois_data : optional WHOIS record from whois_lookup.lookup_whois() —
+                 nameserver entries provide high-confidence CDN/hosting signals
+                 that survive header-stripping (e.g. Cloudflare grey-cloud mode)
     """
     results: list[dict] = []
 
@@ -189,6 +193,13 @@ def detect_technologies(
     # Payment processors
     # -----------------------------------------------------------------------
     _detect_payment(results, html_lower, script_srcs)
+
+    # -----------------------------------------------------------------------
+    # Nameserver-based detection (WHOIS) — high-confidence CDN/hosting signals
+    # that survive header stripping or grey-cloud proxy configurations
+    # -----------------------------------------------------------------------
+    if whois_data:
+        _detect_from_nameservers(results, whois_data.get('name_servers', []))
 
     logger.debug('tech_detector: detected %d technologies', len(results))
     return results
@@ -910,6 +921,69 @@ def _detect_server(
 # ---------------------------------------------------------------------------
 # CDN / delivery network detection
 # ---------------------------------------------------------------------------
+
+def _detect_from_nameservers(results: list[dict], name_servers: list[str]) -> None:
+    """
+    Detect CDN and hosting providers from WHOIS nameserver records.
+
+    Nameservers are a higher-confidence signal than response headers for
+    infrastructure detection: they cannot be stripped by a proxy layer, they
+    reflect the actual DNS provider, and they are authoritative regardless of
+    whether the CDN is in full-proxy ("orange cloud") or DNS-only ("grey cloud")
+    mode.
+    """
+    if not name_servers:
+        return
+    ns = ' '.join(name_servers).lower()
+
+    # Cloudflare — nameservers always end in .ns.cloudflare.com
+    if 'ns.cloudflare.com' in ns:
+        _add(results, 'Cloudflare', 'CDN', confidence='high')
+
+    # AWS Route 53 — *.awsdns-NN.{com,net,org,co.uk}
+    if 'awsdns' in ns:
+        _add(results, 'AWS Route 53', 'Hosting', confidence='high')
+
+    # Akamai
+    if 'akam.net' in ns or 'akamai.net' in ns or 'akamaiedge.net' in ns:
+        _add(results, 'Akamai', 'CDN', confidence='high')
+
+    # Fastly
+    if 'fastly.net' in ns:
+        _add(results, 'Fastly', 'CDN', confidence='high')
+
+    # Vercel
+    if 'vercel-dns.com' in ns:
+        _add(results, 'Vercel', 'Hosting', confidence='high')
+
+    # Netlify
+    if 'netlify.com' in ns:
+        _add(results, 'Netlify', 'Hosting', confidence='high')
+
+    # Google Cloud DNS
+    if 'googledomains.com' in ns or 'google.com' in ns:
+        _add(results, 'Google Cloud DNS', 'Hosting', confidence='high')
+
+    # Azure DNS
+    if 'azure-dns.com' in ns:
+        _add(results, 'Azure DNS', 'Hosting', confidence='high')
+
+    # DigitalOcean
+    if 'digitalocean.com' in ns:
+        _add(results, 'DigitalOcean', 'Hosting', confidence='high')
+
+    # Squarespace
+    if 'squarespace.com' in ns:
+        _add(results, 'Squarespace', 'CMS', confidence='high')
+
+    # Shopify (myshopify DNS)
+    if 'myshopify.com' in ns or 'shopify.com' in ns:
+        _add(results, 'Shopify', 'CMS', confidence='high')
+
+    # Wix
+    if 'wixdns.net' in ns or 'wix.com' in ns:
+        _add(results, 'Wix', 'CMS', confidence='high')
+
 
 def _detect_cdn(
     results: list[dict],

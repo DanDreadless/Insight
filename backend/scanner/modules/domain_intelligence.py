@@ -217,7 +217,7 @@ def _domain_entropy(s: str) -> float:
 # Main analysis function
 # ---------------------------------------------------------------------------
 
-def analyse_domain(url: str) -> list[dict]:
+def analyse_domain(url: str, whois_data: dict | None = None) -> list[dict]:
     """
     Perform domain-level threat analysis on a URL.
     Returns list of finding dicts.
@@ -526,5 +526,59 @@ def analyse_domain(url: str) -> list[dict]:
             ),
             'evidence': f'Host: {hostname} | Platform: {platform} ({registrable})',
         })
+
+    # ------------------------------------------------------------------
+    # 10. Newly registered domain — WHOIS creation_date
+    # Skip safe/well-known domains: WHOIS would return decades-old dates
+    # for those, but the check is meaningless for e.g. google.com subdomains.
+    # ------------------------------------------------------------------
+    if whois_data and sld not in _SAFE_DOMAINS:
+        creation_date_str = whois_data.get('creation_date')
+        if creation_date_str:
+            try:
+                from datetime import date as _date
+                creation = _date.fromisoformat(creation_date_str[:10])
+                age_days = (_date.today() - creation).days
+                if age_days <= 30:
+                    findings.append({
+                        'severity': 'MEDIUM',
+                        'category': 'Domain',
+                        'title': f'Newly registered domain ({age_days} day{"s" if age_days != 1 else ""} old)',
+                        'description': (
+                            f'The domain {sld}.{tld} was registered {age_days} day{"s" if age_days != 1 else ""} ago '
+                            f'(registration date: {creation_date_str[:10]}). '
+                            'Attackers routinely register fresh domains specifically for phishing campaigns, '
+                            'ClickFix payload delivery, and malware C2 infrastructure — deploying them '
+                            'immediately before reputation databases have any record of them. '
+                            'Domains under 30 days old are heavily over-represented in active threat feeds. '
+                            'This signal is most significant when combined with a high-risk TLD, external '
+                            'form submission, or obfuscated JavaScript.'
+                        ),
+                        'evidence': (
+                            f'Domain     : {sld}.{tld}\n'
+                            f'Registered : {creation_date_str[:10]}\n'
+                            f'Age        : {age_days} day{"s" if age_days != 1 else ""}'
+                        ),
+                    })
+                elif age_days <= 90:
+                    findings.append({
+                        'severity': 'INFO',
+                        'category': 'Domain',
+                        'title': f'Recently registered domain ({age_days} days old)',
+                        'description': (
+                            f'The domain {sld}.{tld} was registered {age_days} days ago '
+                            f'(registration date: {creation_date_str[:10]}). '
+                            'Domains under 90 days old have elevated representation in threat intelligence '
+                            'feeds, though many are legitimate new sites. Treat as a context signal when '
+                            'evaluating other findings rather than a standalone indicator.'
+                        ),
+                        'evidence': (
+                            f'Domain     : {sld}.{tld}\n'
+                            f'Registered : {creation_date_str[:10]}\n'
+                            f'Age        : {age_days} days'
+                        ),
+                    })
+            except (ValueError, TypeError):
+                pass  # Malformed or redacted WHOIS date — skip silently
 
     return findings

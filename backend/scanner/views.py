@@ -160,7 +160,7 @@ class ScanStreamView(View):
             return JsonResponse({'error': 'Scan not found.'}, status=404)
 
         def event_stream():
-            max_polls = 120  # 120 * 2s = 4 minutes max stream
+            max_polls = 240  # 240 * 1s = 4 minutes max stream
             polls = 0
 
             while polls < max_polls:
@@ -197,7 +197,7 @@ class ScanStreamView(View):
                     'findings_count': progress.get('findings_count', 0),
                 }))
 
-                time.sleep(2)
+                time.sleep(1)
                 polls += 1
 
             # Timeout

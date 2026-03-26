@@ -278,5 +278,29 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
                 'evidence': evidence_block,
             })
 
+    # Context 7: Newly registered domain + high-risk TLD → purpose-built attack infrastructure
+    # Even without any content-based findings, this combination is a strong operational
+    # indicator: the vast majority of fresh high-risk-TLD registrations are throwaway
+    # attack domains that never accumulate enough reputation for blocklists to catch them.
+    has_new_domain = _has_title_fragment('newly registered domain')
+    if has_new_domain and has_highrisk_tld:
+        if not any(f.get('title') == 'Context collapse: newly registered high-risk domain' for f in findings):
+            synthetic.append({
+                'severity': 'HIGH',
+                'category': 'Threat',
+                'title': 'Context collapse: newly registered high-risk domain',
+                'description': (
+                    'A domain registered within the last 30 days on a high-risk TLD was detected. '
+                    'This combination — fresh registration on a cheap, abuse-prone TLD — is a strong '
+                    'operational indicator of purpose-built attack infrastructure. Threat actors '
+                    'register large batches of such domains for phishing, ClickFix delivery, malware '
+                    'C2, and spam campaigns, discarding them before they appear in reputation feeds. '
+                    'The absence of content-based findings does not rule out a threat: scanners '
+                    'may encounter a staging page, parked domain, or redirect chain before the '
+                    'payload is activated.'
+                ),
+                'evidence': 'Newly registered domain (<30 days) + high-risk TLD combination',
+            })
+
     findings.extend(synthetic)
     return findings

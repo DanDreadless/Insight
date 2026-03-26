@@ -505,28 +505,33 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         # Step 4: Collect resources (text/HTML responses only)
         # ----------------------------------------------------------------
-        _update_progress(job, 2, 6, 'Collecting resources', final_url, len(all_findings))
         logger.info('[scan:%s] Collecting resources', scan_job_id)
         resources = collect_resources(html_content, final_url)
 
         # ----------------------------------------------------------------
-        # Step 4a: Technology detection + WHOIS lookup
+        # Step 4a: WHOIS lookup + Technology detection
+        # WHOIS runs first so nameserver records are available to the
+        # tech detector for high-confidence CDN/hosting identification.
+        # The progress label is written here (not at collect_resources above)
+        # because the WHOIS query is the dominant wait time in this phase —
+        # the user sees an accurate label for the ~5–10s it takes.
         # ----------------------------------------------------------------
-        logger.info('[scan:%s] Detecting technologies', scan_job_id)
-        detected_technologies: list[dict] = []
-        try:
-            detected_technologies = tech_detector.detect_technologies(
-                html_content, response_headers, resources
-            )
-        except Exception as exc:
-            logger.warning('[scan:%s] Tech detection error: %s', scan_job_id, exc)
-
+        _update_progress(job, 2, 6, 'Resolving domain & detecting technologies', final_url, len(all_findings))
         logger.info('[scan:%s] WHOIS lookup for %s', scan_job_id, _get_client_ip_from_url(final_url))
         whois_data: dict | None = None
         try:
             whois_data = lookup_whois(_get_client_ip_from_url(final_url))
         except Exception as exc:
             logger.warning('[scan:%s] WHOIS lookup error: %s', scan_job_id, exc)
+
+        logger.info('[scan:%s] Detecting technologies', scan_job_id)
+        detected_technologies: list[dict] = []
+        try:
+            detected_technologies = tech_detector.detect_technologies(
+                html_content, response_headers, resources, whois_data=whois_data
+            )
+        except Exception as exc:
+            logger.warning('[scan:%s] Tech detection error: %s', scan_job_id, exc)
 
         # ----------------------------------------------------------------
         # Step 4b: Header analysis
@@ -566,7 +571,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         _update_progress(job, 4, 6, 'Analysing domain & HTML', final_url, len(all_findings))
         logger.info('[scan:%s] Analysing domain', scan_job_id)
-        domain_findings = domain_intelligence.analyse_domain(final_url)
+        domain_findings = domain_intelligence.analyse_domain(final_url, whois_data=whois_data)
         for f in domain_findings:
             f.setdefault('resource_url', final_url)
         all_findings.extend(domain_findings)
