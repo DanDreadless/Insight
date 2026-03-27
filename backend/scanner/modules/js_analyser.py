@@ -1200,6 +1200,65 @@ def _check_document_write_external_script(js: str) -> list[dict]:
     return findings
 
 
+def _extract_injected_script_src(window: str) -> str | None:
+    """
+    Extract the URL being assigned to a dynamically created script element.
+
+    Handles three common patterns found in the 1500-char window after the
+    createElement('script') call:
+
+    1. String literal:   elem.src = 'https://...'   → return the URL as-is
+    2. atob() call:      elem.src = atob('base64')   → decode and return the URL
+    3. Variable ref:     elem.src = varName          → return the variable name
+                         with the assignment value if it can be found nearby
+
+    Returns None if no src assignment is detectable.
+    """
+    # Pattern 1: string literal  .src = "url"  or  ['src'] = "url"
+    literal_m = re.search(
+        r"""(?:\.src\s*=\s*|['"]\s*src\s*['"]\s*\]\s*=\s*)(['"])(https?://[^'"]{4,})\1""",
+        window,
+        re.IGNORECASE,
+    )
+    if literal_m:
+        return literal_m.group(2).strip()
+
+    # Pattern 2: atob()-encoded src  .src = atob('base64...')
+    atob_m = re.search(
+        r"""(?:\.src\s*=\s*|['"]\s*src\s*['"]\s*\]\s*=\s*)atob\s*\(\s*(['"])([\w+/=]{16,})\1\s*\)""",
+        window,
+        re.IGNORECASE,
+    )
+    if atob_m:
+        import base64 as _b64
+        try:
+            decoded = _b64.b64decode(atob_m.group(2) + '==').decode('utf-8', errors='replace').strip()
+            return f'{decoded}  [decoded from atob]'
+        except Exception:
+            return f'atob("{atob_m.group(2)}")  [decode failed]'
+
+    # Pattern 3: variable reference  .src = varName
+    var_m = re.search(
+        r"""(?:\.src\s*=\s*|['"]\s*src\s*['"]\s*\]\s*=\s*)([$_a-zA-Z][$_a-zA-Z0-9]*)""",
+        window,
+        re.IGNORECASE,
+    )
+    if var_m:
+        var_name = var_m.group(1)
+        # Try to resolve the variable in the surrounding window by finding its
+        # most recent string assignment: varName = 'value' or varName = "value"
+        resolve_m = re.search(
+            r"""\b""" + re.escape(var_name) + r"""\s*=\s*(['"])(https?://[^'"]{4,})\1""",
+            window,
+            re.IGNORECASE,
+        )
+        if resolve_m:
+            return resolve_m.group(2).strip()
+        return f'<variable: {var_name}>'
+
+    return None
+
+
 def _check_dom_script_injection(js: str) -> list[dict]:
     """
     Detect dynamic script injection via createElement('script') + src + appendChild.
@@ -1211,6 +1270,9 @@ def _check_dom_script_injection(js: str) -> list[dict]:
 
     Handles both dot-notation (elem.src = url) and bracket-notation
     (elem['src'] = url) so it catches hex-decoded obfuscated loaders too.
+
+    Evidence block includes the extracted src URL (decoded if atob-wrapped) so
+    analysts can identify the injected script without reading through the code.
     """
     # Match createElement('script') in both dot-notation and bracket-notation:
     #   dot:     document.createElement('script')   → createElement(
@@ -1241,6 +1303,14 @@ def _check_dom_script_injection(js: str) -> list[dict]:
     if not has_src:
         return []
 
+    # Try to extract the actual URL being injected — include in evidence so
+    # the analyst doesn't need to read through the code to find it.
+    injected_src = _extract_injected_script_src(window)
+
+    evidence_parts = [f'[Injection code]\n{_snippet(js, m)}']
+    if injected_src:
+        evidence_parts.append(f'[Injected script URL]\n{injected_src}')
+
     return [{
         'severity': 'HIGH',
         'category': 'JavaScript',
@@ -1252,7 +1322,7 @@ def _check_dom_script_injection(js: str) -> list[dict]:
             'Commonly used in ad injectors, Magecart skimmers, and JavaScript droppers to '
             'pull a second-stage payload into the page at runtime.'
         ),
-        'evidence': _snippet(js, m),
+        'evidence': '\n\n'.join(evidence_parts),
     }]
 
 
