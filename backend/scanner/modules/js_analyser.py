@@ -297,6 +297,84 @@ def _check_fromcharcode(js: str) -> list[dict]:
     return findings
 
 
+def _check_hex_string_obfuscation(js: str) -> list[dict]:
+    """
+    Detect systematic \\x hex-escape obfuscation in JavaScript.
+
+    Occasional \\x escapes are normal (special chars, unicode).  Systematic
+    encoding of entire string literals — especially property names accessed via
+    bracket notation — is a strong obfuscation indicator used in phishing kits,
+    skimmers, and credential harvesters to evade static analysis.
+    """
+    hex_seq = re.compile(r'\\x[0-9a-fA-F]{2}')
+    total_sequences = len(hex_seq.findall(js))
+
+    # Noise threshold: ignore files with only a handful of \x sequences
+    if total_sequences < 15:
+        return []
+
+    # Decode hex-dominated string literals (≥4 consecutive \xNN sequences)
+    hex_str_re = re.compile(r'(?:\\x[0-9a-fA-F]{2}){4,}')
+    decoded_strings: list[str] = []
+    seen: set[str] = set()
+    for m in hex_str_re.finditer(js):
+        raw = m.group(0)
+        if raw in seen:
+            continue
+        seen.add(raw)
+        try:
+            decoded = bytes(
+                int(h, 16) for h in re.findall(r'\\x([0-9a-fA-F]{2})', raw)
+            ).decode('utf-8', errors='replace')
+            if decoded.strip():
+                decoded_strings.append(decoded)
+        except Exception:
+            pass
+        if len(decoded_strings) >= 15:
+            break
+
+    # Flag decoded values that expose DOM/browser API operations
+    _DOM_KEYWORDS = {
+        'appendChild', 'innerHTML', 'outerHTML', 'insertAdjacentHTML',
+        'createElement', 'document', 'script', 'eval', 'fetch',
+        'XMLHttpRequest', 'cookie', 'localStorage', 'sessionStorage',
+        'location', 'href', 'src', 'head', 'body', 'init',
+    }
+    suspicious = [d for d in decoded_strings if any(k in d for k in _DOM_KEYWORDS)]
+
+    severity = 'HIGH' if suspicious else 'MEDIUM'
+
+    evidence_parts = [f'Total \\x hex sequences: {total_sequences}']
+    if decoded_strings:
+        evidence_parts.append('\n[Decoded hex string literals (sample)]:')
+        for d in decoded_strings[:10]:
+            evidence_parts.append(f'  {d!r}')
+    if suspicious:
+        evidence_parts.append('\n[Suspicious decoded values — DOM/browser APIs hidden in hex]:')
+        for d in suspicious[:5]:
+            evidence_parts.append(f'  {d!r}')
+
+    dom_note = (
+        ' Decoded values expose DOM manipulation and browser API calls — '
+        'the obfuscated code actively modifies the page structure.'
+        if suspicious else ''
+    )
+
+    return [{
+        'severity': severity,
+        'category': 'JavaScript',
+        'title': f'Hex-encoded string obfuscation ({total_sequences} \\x sequences)',
+        'description': (
+            f'The script contains {total_sequences} \\x hex-escape sequences systematically '
+            'replacing string literals and property names. This technique hides method calls, '
+            'URLs, and behaviour from static analysis tools and WAFs.'
+            + dom_note +
+            ' Commonly used in phishing kits, credit card skimmers, and credential harvesters.'
+        ),
+        'evidence': '\n'.join(evidence_parts),
+    }]
+
+
 _JS_KEYWORDS = frozenset([
     'function', 'return', 'var ', 'let ', 'const ', 'if(', 'if (', 'else',
     'for(', 'for (', 'while(', 'while (', 'switch(', 'switch (', 'case ',
@@ -1658,6 +1736,7 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
         add_findings(_check_eval_obfuscation(js))
         add_findings(_check_array_rotation_obfuscation(js))
         add_findings(_check_fromcharcode(js))
+        add_findings(_check_hex_string_obfuscation(js))
         add_findings(_check_high_entropy_strings(js, source_url))
         add_findings(_check_split_join_evasion(js))
         add_findings(_check_cookie_exfiltration(js))

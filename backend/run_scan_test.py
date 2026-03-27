@@ -295,6 +295,25 @@ def run_scan(target_url, verbose=True):
         print(f"      Analysed {js_count} script(s) | "
               f"{len([f for f in js_findings if f.get('category') == 'JavaScript'])} JS finding(s)")
 
+    # --- Direct script routing ---
+    # If the URL is a .js file (or served with a JS content-type) and no scripts
+    # were found via <script> tags, route the raw body through the JS analyser.
+    # Mirrors the _is_direct_script path in tasks.py (step 4f).
+    from pathlib import PurePosixPath
+    _suffix = PurePosixPath(urlparse(final_url).path).suffix.lower()
+    _ct = response_headers.get('Content-Type', response_headers.get('content-type', '')).lower().split(';')[0].strip()
+    _JS_EXTS = {'.js', '.mjs', '.jsx', '.ts', '.tsx', '.jse'}
+    _JS_CTS = {'text/javascript', 'application/javascript', 'application/x-javascript', 'text/jscript'}
+    if (_suffix in _JS_EXTS or _ct in _JS_CTS) and html_content.strip() and js_count == 0:
+        if verbose:
+            print(f"\n      Direct script file detected — analysing raw body via JS analyser...")
+        direct_jf = js_analyser.analyse_js(html_content, final_url)
+        for f in direct_jf:
+            f.setdefault('resource_url', final_url)
+        all_findings.extend(direct_jf)
+        if verbose:
+            print(f"      {len(direct_jf)} finding(s) from direct script analysis")
+
     # --- Deduplicate, collapse, sort ---
     all_findings = scorer.deduplicate_findings(all_findings)
     all_findings = scorer.context_collapse_check(all_findings)

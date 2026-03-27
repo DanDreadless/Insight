@@ -258,6 +258,7 @@ export default function ScanPage() {
   const [scan, setScan] = useState<ScanJob | null>(null)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
 
   useEffect(() => {
     if (!id) return
@@ -394,8 +395,6 @@ export default function ScanPage() {
   }
 
   // Complete
-  const [feedbackOpen, setFeedbackOpen] = useState(false)
-
   const SEVERITY_RANK: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 }
   const findings = [...(scan.findings ?? [])].sort(
     (a, b) => (SEVERITY_RANK[a.severity] ?? 4) - (SEVERITY_RANK[b.severity] ?? 4)
