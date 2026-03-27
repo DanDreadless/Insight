@@ -1259,7 +1259,7 @@ def _extract_injected_script_src(window: str) -> str | None:
     return None
 
 
-def _check_dom_script_injection(js: str) -> list[dict]:
+def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
     """
     Detect dynamic script injection via createElement('script') + src + appendChild.
 
@@ -1274,6 +1274,13 @@ def _check_dom_script_injection(js: str) -> list[dict]:
     Evidence block includes the extracted src URL (decoded if atob-wrapped) so
     analysts can identify the injected script without reading through the code.
     """
+    # Analytics and tag-management scripts (GTM, GA, etc.) use this exact
+    # pattern to load their tags at runtime — it is their intended mechanism,
+    # not an attack.  Suppress when the script originates from a known-good
+    # or analytics domain so we don't fire on GTM loading its own tag library.
+    if source_url and (is_analytics(source_url) or is_known_good(source_url)):
+        return []
+
     # Match createElement('script') in both dot-notation and bracket-notation:
     #   dot:     document.createElement('script')   → createElement(
     #   bracket: document['createElement']('script') → createElement']('script')
@@ -1897,7 +1904,7 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
         add_findings(_check_sendbeacon_external(js, source_url))
         add_findings(_check_clipboard_hijacking(js))
         add_findings(_check_document_write_external_script(js))
-        add_findings(_check_dom_script_injection(js))
+        add_findings(_check_dom_script_injection(js, source_url))
         add_findings(_check_shell_dropper(js))
         add_findings(_check_html_smuggling(js))
         add_findings(_check_wallet_drainer(js))

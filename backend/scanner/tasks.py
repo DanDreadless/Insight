@@ -675,6 +675,9 @@ def run_scan(self, scan_job_id: str) -> dict:
                 script_url = script.get('url', '')
                 if not script_url:
                     continue
+                if is_known_good(script_url):
+                    logger.info('[scan:%s] Skipping known-good script: %s', scan_job_id, script_url)
+                    continue
                 _update_progress(job, 5, 6, f'Analysing script {processed + 1}/{scripts_total}', script_url, len(all_findings))
                 logger.info('[scan:%s] Fetching external script: %s', scan_job_id, script_url)
                 try:
