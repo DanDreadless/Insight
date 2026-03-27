@@ -1195,6 +1195,62 @@ def _check_document_write_external_script(js: str) -> list[dict]:
     return findings
 
 
+def _check_dom_script_injection(js: str) -> list[dict]:
+    """
+    Detect dynamic script injection via createElement('script') + src + appendChild.
+
+    Functionally equivalent to document.write(<script src=...>) but evades naive
+    detection and CSP report-only modes.  The createElement/src/appendChild triad
+    is the standard DOM-based script loader used by ad injectors, Magecart skimmers,
+    and JavaScript droppers to pull in a second-stage payload at runtime.
+
+    Handles both dot-notation (elem.src = url) and bracket-notation
+    (elem['src'] = url) so it catches hex-decoded obfuscated loaders too.
+    """
+    # Match createElement('script') in both dot-notation and bracket-notation:
+    #   dot:     document.createElement('script')   → createElement(
+    #   bracket: document['createElement']('script') → createElement']('script')
+    create_re = re.compile(
+        r"createElement\s*(?:['\"]?\s*\])?\s*\(\s*['\"]script['\"]\s*\)",
+        re.IGNORECASE,
+    )
+    m = create_re.search(js)
+    if not m:
+        return []
+
+    # Look for appendChild within 1500 chars after the createElement call
+    window = js[m.start(): min(len(js), m.start() + 1500)]
+
+    has_append = bool(re.search(r'appendChild\b', window, re.IGNORECASE))
+    if not has_append:
+        return []
+
+    # src assignment in either notation:
+    #   dot:     elem.src = url
+    #   bracket: elem['src'] = url  or  elem["src"] = url
+    has_src = bool(re.search(
+        r"""(?:['"]\s*src\s*['"]\s*\]\s*=|\.src\s*=)""",
+        window,
+        re.IGNORECASE,
+    ))
+    if not has_src:
+        return []
+
+    return [{
+        'severity': 'HIGH',
+        'category': 'JavaScript',
+        'title': 'Dynamic script injection — createElement + src + appendChild',
+        'description': (
+            'Script creates a <script> element, assigns an external src, and appends it '
+            'to the document. This DOM-based loader is equivalent to document.write(<script src=...>) '
+            'but harder to block with CSP and invisible to naive static analysis. '
+            'Commonly used in ad injectors, Magecart skimmers, and JavaScript droppers to '
+            'pull a second-stage payload into the page at runtime.'
+        ),
+        'evidence': _snippet(js, m),
+    }]
+
+
 def _check_shell_dropper(js: str) -> list[dict]:
     """
     Detect shell command dropper strings embedded in JavaScript.
@@ -1711,11 +1767,31 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
 
     findings: list[dict] = []
 
-    # Run analysis on both original and beautified versions, de-duplicate by title
+    # Build analysis versions: original, beautified, hex-decoded, beautified hex-decoded.
+    # Running all checks against the decoded version ensures obfuscated bracket-notation
+    # code (e.g. document['createElement']('script')) is caught by the same rules that
+    # cover plaintext dot-notation code.
+    _HEX_RE = re.compile(r'\\x([0-9a-fA-F]{2})')
+
+    def _decode_hex(s: str) -> str:
+        def _r(m: re.Match) -> str:
+            try:
+                return chr(int(m.group(1), 16))
+            except Exception:
+                return m.group(0)
+        return _HEX_RE.sub(_r, s)
+
     beautified = _beautify(js_content)
-    versions = [js_content]
+    hex_decoded = _decode_hex(js_content)
+
+    versions: list[str] = [js_content]
     if beautified != js_content:
         versions.append(beautified)
+    if hex_decoded != js_content:
+        versions.append(hex_decoded)
+        beautified_hex = _beautify(hex_decoded)
+        if beautified_hex != hex_decoded:
+            versions.append(beautified_hex)
 
     seen_titles: set[str] = set()
 
@@ -1746,6 +1822,7 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
         add_findings(_check_sendbeacon_external(js, source_url))
         add_findings(_check_clipboard_hijacking(js))
         add_findings(_check_document_write_external_script(js))
+        add_findings(_check_dom_script_injection(js))
         add_findings(_check_shell_dropper(js))
         add_findings(_check_html_smuggling(js))
         add_findings(_check_wallet_drainer(js))
