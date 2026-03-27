@@ -305,6 +305,10 @@ def _check_hex_string_obfuscation(js: str) -> list[dict]:
     encoding of entire string literals — especially property names accessed via
     bracket notation — is a strong obfuscation indicator used in phishing kits,
     skimmers, and credential harvesters to evade static analysis.
+
+    Evidence block contains the full original encoded script and the fully
+    decoded script (every \\xNN replaced with its character) so an analyst
+    can read both and make their own judgement.
     """
     hex_seq = re.compile(r'\\x[0-9a-fA-F]{2}')
     total_sequences = len(hex_seq.findall(js))
@@ -313,51 +317,41 @@ def _check_hex_string_obfuscation(js: str) -> list[dict]:
     if total_sequences < 15:
         return []
 
-    # Decode hex-dominated string literals (≥4 consecutive \xNN sequences)
-    hex_str_re = re.compile(r'(?:\\x[0-9a-fA-F]{2}){4,}')
-    decoded_strings: list[str] = []
-    seen: set[str] = set()
-    for m in hex_str_re.finditer(js):
-        raw = m.group(0)
-        if raw in seen:
-            continue
-        seen.add(raw)
+    # Produce a fully decoded version — replace every \xNN escape with its char
+    def _replace_hex(m: re.Match) -> str:
         try:
-            decoded = bytes(
-                int(h, 16) for h in re.findall(r'\\x([0-9a-fA-F]{2})', raw)
-            ).decode('utf-8', errors='replace')
-            if decoded.strip():
-                decoded_strings.append(decoded)
+            return chr(int(m.group(1), 16))
         except Exception:
-            pass
-        if len(decoded_strings) >= 15:
-            break
+            return m.group(0)
 
-    # Flag decoded values that expose DOM/browser API operations
+    decoded_full = re.sub(r'\\x([0-9a-fA-F]{2})', _replace_hex, js)
+
+    # Flag if decoded script exposes DOM/browser API operations
     _DOM_KEYWORDS = {
         'appendChild', 'innerHTML', 'outerHTML', 'insertAdjacentHTML',
         'createElement', 'document', 'script', 'eval', 'fetch',
         'XMLHttpRequest', 'cookie', 'localStorage', 'sessionStorage',
-        'location', 'href', 'src', 'head', 'body', 'init',
+        'location', 'href', 'src', 'head', 'body',
     }
-    suspicious = [d for d in decoded_strings if any(k in d for k in _DOM_KEYWORDS)]
+    has_dom = any(k in decoded_full for k in _DOM_KEYWORDS)
 
-    severity = 'HIGH' if suspicious else 'MEDIUM'
+    severity = 'HIGH' if has_dom else 'MEDIUM'
 
-    evidence_parts = [f'Total \\x hex sequences: {total_sequences}']
-    if decoded_strings:
-        evidence_parts.append('\n[Decoded hex string literals (sample)]:')
-        for d in decoded_strings[:10]:
-            evidence_parts.append(f'  {d!r}')
-    if suspicious:
-        evidence_parts.append('\n[Suspicious decoded values — DOM/browser APIs hidden in hex]:')
-        for d in suspicious[:5]:
-            evidence_parts.append(f'  {d!r}')
+    # Cap each section at 10 KB to keep DB rows reasonable
+    _MAX = 10_000
+    original_block = js if len(js) <= _MAX else js[:_MAX] + '\n... [truncated]'
+    decoded_block  = decoded_full if len(decoded_full) <= _MAX else decoded_full[:_MAX] + '\n... [truncated]'
 
     dom_note = (
-        ' Decoded values expose DOM manipulation and browser API calls — '
+        ' Decoded script exposes DOM manipulation and browser API calls — '
         'the obfuscated code actively modifies the page structure.'
-        if suspicious else ''
+        if has_dom else ''
+    )
+
+    evidence = (
+        f'Total \\x hex sequences: {total_sequences}\n\n'
+        f'[Original — encoded]:\n{original_block}\n\n'
+        f'[Decoded — all \\x sequences resolved]:\n{decoded_block}'
     )
 
     return [{
@@ -371,7 +365,7 @@ def _check_hex_string_obfuscation(js: str) -> list[dict]:
             + dom_note +
             ' Commonly used in phishing kits, credit card skimmers, and credential harvesters.'
         ),
-        'evidence': '\n'.join(evidence_parts),
+        'evidence': evidence,
     }]
 
 
