@@ -194,10 +194,31 @@ def run_scan(target_url, verbose=True):
         'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
         'amazon.com', 'microsoft.com', 'apple.com', 'wikipedia.org',
     })
+    _orig_host = urlparse(target_url).hostname or ''
+    _orig_is_ip = bool(__import__('re').match(r'^\d{1,3}(?:\.\d{1,3}){3}$', _orig_host))
+    if _orig_is_ip:
+        all_findings.append({
+            'severity': 'MEDIUM',
+            'category': 'Domain',
+            'title': 'Submitted URL uses a bare IP address',
+            'description': (
+                f'The submitted URL targets a server by its raw IP address ({_orig_host}) '
+                'rather than a registered domain name. Bare IP hosting is uncommon for legitimate '
+                'sites — it is frequently used by malware distribution infrastructure, phishing '
+                'kits, and C2 servers to avoid registering a traceable domain. Combined with an '
+                'obfuscated or hashed path, this is a strong indicator of malicious hosting.'
+            ),
+            'evidence': f'Submitted URL: {target_url}\nHost: {_orig_host}',
+            'resource_url': target_url,
+        })
     _orig_domain = _tle.extract(target_url).top_domain_under_public_suffix
     _final_domain = _tle.extract(final_url).top_domain_under_public_suffix
     _skip_content_analysis = False
-    if _orig_domain and _final_domain and _orig_domain != _final_domain:
+    _cross_domain = (
+        (_orig_domain and _final_domain and _orig_domain != _final_domain)
+        or (_orig_is_ip and _final_domain)
+    )
+    if _cross_domain:
         _redirect_to_cloaking_target = _final_domain in _CLOAKING_REDIRECT_TARGETS
         all_findings.append({
             'severity': 'HIGH',

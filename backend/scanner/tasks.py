@@ -4,6 +4,7 @@ Celery tasks for the scanner application.
 import hashlib
 import logging
 import os
+import re
 import time
 from urllib.parse import urlparse
 
@@ -329,10 +330,34 @@ def run_scan(self, scan_job_id: str) -> dict:
             'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
             'amazon.com', 'microsoft.com', 'apple.com', 'wikipedia.org',
         })
+        _submitted_host = urlparse(url).hostname or ''
+        _submitted_is_ip = bool(re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', _submitted_host))
+        if _submitted_is_ip:
+            all_findings.append({
+                'severity': 'MEDIUM',
+                'category': 'Domain',
+                'title': 'Submitted URL uses a bare IP address',
+                'description': (
+                    f'The submitted URL targets a server by its raw IP address ({_submitted_host}) '
+                    'rather than a registered domain name. Bare IP hosting is uncommon for legitimate '
+                    'sites — it is frequently used by malware distribution infrastructure, phishing '
+                    'kits, and C2 servers to avoid registering a traceable domain. Combined with an '
+                    'obfuscated or hashed path, this is a strong indicator of malicious hosting.'
+                ),
+                'evidence': f'Submitted URL: {url}\nHost: {_submitted_host}',
+                'resource_url': url,
+            })
         _submitted_domain = _tldextract.extract(url).top_domain_under_public_suffix
         _final_domain_r = _tldextract.extract(final_url).top_domain_under_public_suffix
         _skip_content_analysis = False
-        if _submitted_domain and _final_domain_r and _submitted_domain != _final_domain_r:
+        _cross_domain = (
+            # Normal domain-to-domain redirect
+            (_submitted_domain and _final_domain_r and _submitted_domain != _final_domain_r)
+            # IP-to-domain redirect — tldextract returns '' for IP hosts so the
+            # standard check would silently pass; handle it explicitly.
+            or (_submitted_is_ip and _final_domain_r)
+        )
+        if _cross_domain:
             _redirect_to_cloaking_target = _final_domain_r in _CLOAKING_REDIRECT_TARGETS
             all_findings.append({
                 'severity': 'HIGH',

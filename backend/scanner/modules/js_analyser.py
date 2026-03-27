@@ -406,6 +406,16 @@ def _check_high_entropy_strings(js: str, source_url: str = '') -> list[dict]:
             continue
         seen.add(literal)
 
+        # Skip URL strings — query parameters and hex tracking tokens raise
+        # entropy naturally, but URLs are never encoded payloads.
+        if re.match(r'https?://', literal, re.IGNORECASE):
+            continue
+
+        # Skip CSS-like strings — property:value pairs produce naturally high
+        # entropy from the mix of colons, semicolons, hashes, and keywords.
+        if len(re.findall(r'[a-z-]+\s*:', literal, re.IGNORECASE)) >= 3:
+            continue
+
         # Skip SRI integrity hashes — sha256-/sha384-/sha512- prefixed base64
         # strings are legitimately high-entropy but are not payloads.
         if re.match(r'sha(?:256|384|512)-[A-Za-z0-9+/=]+$', literal, re.IGNORECASE):
@@ -871,6 +881,11 @@ def _check_hidden_iframe_injection(js: str, source_url: str = '') -> list[dict]:
     # is highly specific — it only appears in Tealium's tag container code.
     if 'utag.ut.merge' in js:
         return findings
+    # BuyGoods affiliate conversion pixel — a hidden iframe loading
+    # buygoods.com/affiliates/go/conversion is standard affiliate tracking,
+    # not clickjacking or drive-by malware.
+    if 'buygoods.com/affiliates/go/conversion' in js:
+        return findings
     iframe_m = re.search(
         r'createElement\s*\(\s*["\']iframe["\']',
         js, re.IGNORECASE
@@ -942,9 +957,12 @@ def _check_forced_download(js: str) -> list[dict]:
 def _check_auto_redirect(js: str) -> list[dict]:
     findings: list[dict] = []
 
-    # window.location assignment in setTimeout with delay < 3000
+    # window.location assignment in setTimeout with delay < 3000.
+    # Require an actual assignment (window.location = or window.location.href =)
+    # not just any window.location reference — reading window.location.search
+    # to construct a URL is not a redirect.
     pattern = re.compile(
-        r'setTimeout\s*\(\s*function\s*\(\s*\)\s*\{[^}]*window\.location[^}]*\}\s*,\s*(\d+)',
+        r'setTimeout\s*\(\s*function\s*\(\s*\)\s*\{[^}]*window\.location(?:\.href)?\s*=[^=][^}]*\}\s*,\s*(\d+)',
         re.IGNORECASE | re.DOTALL,
     )
     for m in pattern.finditer(js):
@@ -1328,6 +1346,12 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
     # not an attack.  Suppress when the script originates from a known-good
     # or analytics domain so we don't fire on GTM loading its own tag library.
     if source_url and (is_analytics(source_url) or is_known_good(source_url)):
+        return []
+
+    # Visual Website Optimizer (VWO) — its standard loader defines an internal
+    # addScript() helper that uses the createElement/src/appendChild triad.
+    # This is A/B testing infrastructure, not script injection.
+    if '_vwo_code' in js or 'visualwebsiteoptimizer.com' in js:
         return []
 
     # Match createElement('script') in both dot-notation and bracket-notation:
