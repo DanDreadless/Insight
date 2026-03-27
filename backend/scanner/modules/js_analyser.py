@@ -981,6 +981,55 @@ def _check_auto_redirect(js: str) -> list[dict]:
     return findings
 
 
+def _check_js_location_redirect(js: str, source_url: str = '') -> list[dict]:
+    """
+    Detects unconditional window.location / window.location.href assignments
+    to a literal external URL — a classic open-redirect staging pattern where
+    a neutral host (cloud storage, CDN, GitHub Pages) serves a minimal page
+    whose only purpose is to forward victims to attack infrastructure.
+
+    Covers:
+      window.location.href = 'https://evil.com/...'
+      window.location      = "https://evil.com/..."
+      window.location.href = 'https://evil.com/' + <dynamic suffix>
+    """
+    findings: list[dict] = []
+
+    pattern = re.compile(
+        r'window\.location(?:\.href)?\s*=\s*["\'](\s*https?://([^"\'/?#\s]+)[^"\']*)',
+        re.IGNORECASE,
+    )
+    for m in pattern.finditer(js):
+        target_url = m.group(1).strip()
+        target_domain = m.group(2).lower()
+
+        # Skip same-domain redirects
+        if source_url:
+            source_m = re.match(r'https?://([^/?#]+)', source_url)
+            if source_m and source_m.group(1).lower() == target_domain:
+                continue
+
+        # Skip known-good destinations (Google, Microsoft, CDNs, etc.)
+        if is_known_good(target_domain):
+            continue
+
+        findings.append({
+            'severity': 'MEDIUM',
+            'category': 'JavaScript',
+            'title': f'JavaScript redirect to external domain: {target_domain}',
+            'description': (
+                f'Script unconditionally redirects the visitor to an external domain ({target_domain}) '
+                'via a window.location assignment. This is a common staging technique: a neutral '
+                'hosting platform (cloud storage, CDN, GitHub Pages) serves a minimal wrapper page '
+                'whose only job is to forward victims to the actual attack infrastructure. '
+                f'Run a new scan on {target_domain} to analyse the destination.'
+            ),
+            'evidence': m.group(0).strip(),
+        })
+
+    return findings
+
+
 def _check_right_click_disable(js: str) -> list[dict]:
     findings: list[dict] = []
     # Two separate bounded patterns — avoids the DOTALL backtracking of the original
@@ -1899,6 +1948,7 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
         add_findings(_check_hidden_iframe_injection(js, source_url))
         add_findings(_check_forced_download(js))
         add_findings(_check_auto_redirect(js))
+        add_findings(_check_js_location_redirect(js, source_url))
         add_findings(_check_right_click_disable(js))
         add_findings(_check_devtools_detection(js))
         add_findings(_check_sendbeacon_external(js, source_url))

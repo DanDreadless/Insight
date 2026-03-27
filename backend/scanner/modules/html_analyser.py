@@ -515,6 +515,16 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
     )
     non_script_size = max(full_html_len - script_tag_size, 1)
     if total_inline_script_size > 3 * non_script_size:
+        _script_snippets = []
+        for _s in inline_scripts:
+            _c = _s.get('content', '').strip()
+            if _c:
+                _script_snippets.append(_c[:300] + ('…' if len(_c) > 300 else ''))
+        _evidence = (
+            f'Inline JS: {total_inline_script_size}B | Non-script HTML: {non_script_size}B | Ratio: {total_inline_script_size // max(non_script_size, 1)}×'
+        )
+        if _script_snippets:
+            _evidence += '\n\nScript content:\n' + '\n---\n'.join(_script_snippets)
         findings.append({
             'severity': 'MEDIUM',
             'category': 'JavaScript',
@@ -528,7 +538,7 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
                 'SocGholish injections, and cryptominer landing pages typically have a minimal '
                 'HTML wrapper with large embedded payloads.'
             ),
-            'evidence': f'Inline JS: {total_inline_script_size}B | Non-script HTML: {non_script_size}B | Ratio: {total_inline_script_size // max(non_script_size, 1)}×',
+            'evidence': _evidence,
         })
 
     # ------------------------------------------------------------------
