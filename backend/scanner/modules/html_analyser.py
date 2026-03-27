@@ -25,6 +25,25 @@ _BRAND_KEYWORDS = [
     'roblox', 'discord', 'twitch', 'spotify',
 ]
 
+# Maps a crypto wallet / exchange brand keyword to the set of registered
+# domains that legitimately use that brand.  If the page title claims one
+# of these brands but the page domain is not in the official set, it is
+# almost certainly brand-impersonation phishing.
+_CRYPTO_WALLET_OFFICIAL_DOMAINS: dict[str, frozenset[str]] = {
+    'trezor':        frozenset({'trezor.io'}),
+    'metamask':      frozenset({'metamask.io'}),
+    'ledger':        frozenset({'ledger.com'}),
+    'trustwallet':   frozenset({'trustwallet.com'}),
+    'myetherwallet': frozenset({'myetherwallet.com'}),
+    'phantom':       frozenset({'phantom.app'}),
+    'coinbase':      frozenset({'coinbase.com'}),
+    'uniswap':       frozenset({'uniswap.org'}),
+    'opensea':       frozenset({'opensea.io'}),
+    'kucoin':        frozenset({'kucoin.com'}),
+    'binance':       frozenset({'binance.com'}),
+    'blockfi':       frozenset({'blockfi.com'}),
+}
+
 # Extensions checked against the URL *path only* (never the hostname).
 # .js excluded — it is a normal web asset analysed separately by js_analyser.
 # .com excluded — it is a TLD and would produce false positives on every .com domain.
@@ -299,6 +318,16 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
     # ------------------------------------------------------------------
     # 2. Hidden iframes
     # ------------------------------------------------------------------
+    # Build the set of external script hostnames so we can suppress iframe
+    # findings that come from the same CDN — a strong signal of TMS tracking
+    # pixel infrastructure (e.g. Tealium) rather than an attack.
+    _ext_script_hosts: set[str] = {
+        urlparse(s['url']).hostname or ''
+        for s in resources.get('scripts', [])
+        if not s.get('inline', True) and s.get('url')
+    }
+    _ext_script_hosts.discard('')
+
     for iframe_info in resources.get('iframes', []):
         attrs = iframe_info.get('attrs', {})
         url = iframe_info.get('url', '')
@@ -319,6 +348,13 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
         ])
 
         if is_hidden:
+            # Suppress if iframe src is from the same host as an external
+            # script already loaded on the page.  Tag management systems
+            # (Tealium, similar) load their tracking pixels from the same
+            # CDN distribution as their wrapper script — this is not an attack.
+            iframe_host = urlparse(url).hostname or ''
+            if iframe_host and iframe_host in _ext_script_hosts:
+                continue
             # SEC-19: escape attacker-controlled values so a crafted attribute
             # cannot make the evidence block appear to be a different finding.
             def _esc(s: str) -> str:
@@ -853,6 +889,40 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
     # 19. Shell commands in HTML attributes / hidden elements (ClickFix payload storage)
     # ------------------------------------------------------------------
     findings.extend(_check_shell_commands_in_html(soup))
+
+    # ------------------------------------------------------------------
+    # 21. Crypto wallet brand impersonation (SEO poisoning / fake wallet sites)
+    # ------------------------------------------------------------------
+    # Phishing pages targeting crypto wallet users often don't have a
+    # credential form on the landing page — they use SEO poisoning to
+    # appear in search results for "<Brand> login / download" and then
+    # funnel victims to malicious downloads or seed-phrase harvest pages.
+    # Detect when the page *title* claims a wallet brand but the domain
+    # is not the official one.  Title is the strongest signal: attackers
+    # explicitly set it for CTR in search results.
+    for _brand, _official_domains in _CRYPTO_WALLET_OFFICIAL_DOMAINS.items():
+        if re.search(r'\b' + re.escape(_brand) + r'\b', page_title, re.IGNORECASE):
+            if page_domain not in _official_domains:
+                findings.append({
+                    'severity': 'HIGH',
+                    'category': 'Phishing',
+                    'title': f'Crypto wallet brand impersonation — {_brand.capitalize()}',
+                    'description': (
+                        f'The page title claims to be associated with {_brand.capitalize()} '
+                        f'(official domain(s): {", ".join(sorted(_official_domains))}), '
+                        f'but the actual domain is "{page_domain}". '
+                        'This pattern is characteristic of SEO-poisoning phishing campaigns '
+                        'that target crypto wallet users searching for official download or '
+                        'login pages. Victims are typically served malicious wallet software '
+                        'or redirected to seed-phrase harvesting pages.'
+                    ),
+                    'evidence': (
+                        f'Page title: {page_title}\n'
+                        f'Page domain: {page_domain}\n'
+                        f'Official domain(s): {", ".join(sorted(_official_domains))}'
+                    ),
+                })
+                break  # one finding per page is sufficient
 
     # ------------------------------------------------------------------
     # 20. Fake CAPTCHA / ClickFix social engineering UI text

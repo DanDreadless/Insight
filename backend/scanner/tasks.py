@@ -28,6 +28,7 @@ from scanner.modules import (
 from scanner.modules.robots_checker import check_robots
 from scanner.modules.whois_lookup import lookup_whois
 from scanner.modules.engine_version import get_engine_version
+from scanner.modules.known_good_domains import is_known_good
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,45 @@ def run_scan(self, scan_job_id: str) -> dict:
             })
 
         # ----------------------------------------------------------------
+        # Step 3a-i: Cross-domain redirect detection
+        # If the submitted URL redirected to a completely different registered
+        # domain, flag it.  Phishing kits commonly redirect scanners to major
+        # consumer sites (Google, Bing) while serving malicious content to
+        # real visitors — cloaking.  When the redirect target is one of these
+        # well-known consumer destinations, skip HTML/JS analysis to avoid
+        # firing false positives on the target site's own code.
+        # ----------------------------------------------------------------
+        import tldextract as _tldextract
+        _CLOAKING_REDIRECT_TARGETS: frozenset[str] = frozenset({
+            'google.com', 'bing.com', 'yahoo.com', 'baidu.com', 'duckduckgo.com',
+            'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
+            'amazon.com', 'microsoft.com', 'apple.com', 'wikipedia.org',
+        })
+        _submitted_domain = _tldextract.extract(url).top_domain_under_public_suffix
+        _final_domain_r = _tldextract.extract(final_url).top_domain_under_public_suffix
+        _skip_content_analysis = False
+        if _submitted_domain and _final_domain_r and _submitted_domain != _final_domain_r:
+            _redirect_to_cloaking_target = _final_domain_r in _CLOAKING_REDIRECT_TARGETS
+            all_findings.append({
+                'severity': 'HIGH',
+                'category': 'Redirect',
+                'title': 'Suspicious HTTP redirect to unrelated domain',
+                'description': (
+                    'The submitted URL redirected to a completely different registered domain. '
+                    'Redirecting scanners and bots to an innocent page (e.g. Google) while '
+                    'serving malicious content to real visitors is a well-known cloaking technique '
+                    'used by phishing kits and malware distribution sites to evade automated detection.'
+                    + (' The redirect destination is a major consumer site, which strongly '
+                       'suggests active scanner evasion rather than a legitimate redirect.'
+                       if _redirect_to_cloaking_target else '')
+                ),
+                'evidence': f'Submitted: {url}\nRedirected to: {final_url}',
+                'resource_url': url,
+            })
+            if _redirect_to_cloaking_target:
+                _skip_content_analysis = True
+
+        # ----------------------------------------------------------------
         # Step 3a: Content hash — deduplicate unchanged pages
         # ----------------------------------------------------------------
         content_hash = hashlib.sha256(html_content.encode('utf-8', errors='replace')).hexdigest()
@@ -579,11 +619,14 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         # Step 4d: HTML analysis
         # ----------------------------------------------------------------
-        logger.info('[scan:%s] Analysing HTML', scan_job_id)
-        html_findings = html_analyser.analyse_html(html_content, final_url, resources)
-        for f in html_findings:
-            f.setdefault('resource_url', final_url)
-        all_findings.extend(html_findings)
+        if not _skip_content_analysis:
+            logger.info('[scan:%s] Analysing HTML', scan_job_id)
+            html_findings = html_analyser.analyse_html(html_content, final_url, resources)
+            for f in html_findings:
+                f.setdefault('resource_url', final_url)
+            all_findings.extend(html_findings)
+        else:
+            logger.info('[scan:%s] Skipping HTML/JS analysis — redirect to known-good domain (cloaking)', scan_job_id)
 
         # ----------------------------------------------------------------
         # Step 4e: JavaScript analysis
@@ -595,7 +638,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # proceed directly to verdict — partial results are better than SIGKILL.
         js_time_budget = soft_limit - 15
 
-        scripts = resources.get('scripts', [])
+        scripts = [] if _skip_content_analysis else resources.get('scripts', [])
         processed = 0
         scripts_skipped_budget = 0
         scripts_total = len(scripts)

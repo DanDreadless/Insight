@@ -182,6 +182,42 @@ def run_scan(target_url, verbose=True):
 
     all_findings = []
 
+    # --- Cross-domain redirect check ---
+    # If the submitted URL redirected to a completely different registered domain,
+    # add a HIGH finding.  Phishing kits commonly redirect automated scanners to
+    # major consumer sites (Google, Bing, etc.) while serving malicious content
+    # to real visitors — a technique known as "cloaking".  When the redirect
+    # target is one of these well-known consumer destinations, skip HTML/JS
+    # analysis to avoid firing false positives on the target site's own code.
+    _CLOAKING_REDIRECT_TARGETS: frozenset[str] = frozenset({
+        'google.com', 'bing.com', 'yahoo.com', 'baidu.com', 'duckduckgo.com',
+        'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
+        'amazon.com', 'microsoft.com', 'apple.com', 'wikipedia.org',
+    })
+    _orig_domain = _tle.extract(target_url).top_domain_under_public_suffix
+    _final_domain = _tle.extract(final_url).top_domain_under_public_suffix
+    _skip_content_analysis = False
+    if _orig_domain and _final_domain and _orig_domain != _final_domain:
+        _redirect_to_cloaking_target = _final_domain in _CLOAKING_REDIRECT_TARGETS
+        all_findings.append({
+            'severity': 'HIGH',
+            'category': 'Redirect',
+            'title': 'Suspicious HTTP redirect to unrelated domain',
+            'description': (
+                'The submitted URL redirected to a completely different registered domain. '
+                'Redirecting scanners and bots to an innocent page (e.g. Google) while '
+                'serving malicious content to real visitors is a well-known cloaking technique '
+                'used by phishing kits and malware distribution sites to evade automated detection.'
+                + (' The redirect destination is a major consumer site, which strongly '
+                   'suggests active scanner evasion rather than a legitimate redirect.'
+                   if _redirect_to_cloaking_target else '')
+            ),
+            'evidence': f'Submitted: {target_url}\nRedirected to: {final_url}',
+            'resource_url': target_url,
+        })
+        if _redirect_to_cloaking_target:
+            _skip_content_analysis = True
+
     # --- Headers ---
     if verbose:
         print("[2/6] Analysing headers...")
@@ -221,13 +257,18 @@ def run_scan(target_url, verbose=True):
     # --- HTML ---
     if verbose:
         print("[5/6] Analysing HTML...")
-    resources = collect_resources(html_content, final_url)
-    htmlf = html_analyser.analyse_html(html_content, final_url, resources)
-    for f in htmlf:
-        f.setdefault('resource_url', final_url)
-    all_findings.extend(htmlf)
-    if verbose:
-        print(f"      {len(htmlf)} finding(s)")
+    if _skip_content_analysis:
+        resources = {'scripts': [], 'iframes': [], 'forms': [], 'meta_refresh': []}
+        if verbose:
+            print("      Skipped — redirect target is a known-good domain (cloaking)")
+    else:
+        resources = collect_resources(html_content, final_url)
+        htmlf = html_analyser.analyse_html(html_content, final_url, resources)
+        for f in htmlf:
+            f.setdefault('resource_url', final_url)
+        all_findings.extend(htmlf)
+        if verbose:
+            print(f"      {len(htmlf)} finding(s)")
 
     # --- JavaScript ---
     if verbose:

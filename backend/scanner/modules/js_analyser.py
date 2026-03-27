@@ -866,6 +866,11 @@ def _check_hidden_iframe_injection(js: str, source_url: str = '') -> list[dict]:
     # is window.__CF$cv$params.  This is WAF infrastructure, not an attack.
     if '__CF$cv$params' in js:
         return findings
+    # Tealium Tag Management System (utag) creates 1×1 hidden iframes as
+    # standard tracking-pixel infrastructure.  The utag.ut.merge signature
+    # is highly specific — it only appears in Tealium's tag container code.
+    if 'utag.ut.merge' in js:
+        return findings
     iframe_m = re.search(
         r'createElement\s*\(\s*["\']iframe["\']',
         js, re.IGNORECASE
