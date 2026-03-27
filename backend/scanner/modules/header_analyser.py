@@ -328,6 +328,13 @@ def analyse_headers(headers: dict, url: str, status_code: int) -> list[dict]:
 
     for cookie_val in set_cookie_headers:
         cookie_lower = cookie_val.lower()
+
+        # Skip deletion cookies — Expires=Thu, 01-Jan-1970 is the canonical
+        # way to instruct browsers to remove a cookie immediately.  An empty
+        # cookie being deleted cannot have its flags exploited.
+        if re.search(r'expires=[^;]*1970', cookie_lower):
+            continue
+
         issues: list[str] = []
 
         if 'httponly' not in cookie_lower:
@@ -362,15 +369,16 @@ def analyse_headers(headers: dict, url: str, status_code: int) -> list[dict]:
     acac = h.get('access-control-allow-credentials', '')
     if acao.strip() == '*' and acac.strip().lower() == 'true':
         findings.append({
-            'severity': 'HIGH',
+            'severity': 'MEDIUM',
             'category': 'Headers',
-            'title': 'Critical CORS misconfiguration: wildcard + credentials',
+            'title': 'CORS misconfiguration: wildcard origin with credentials flag',
             'description': (
-                'Access-Control-Allow-Origin: * combined with Access-Control-Allow-Credentials: true '
-                'is a dangerous CORS misconfiguration. While browsers reject this combination per the '
-                'CORS specification, it signals a deeply misconfigured server that likely has other '
-                'CORS issues. An attacker could craft a variation that successfully reads authenticated '
-                'responses from any origin — enabling cross-origin session hijacking and data exfiltration.'
+                'Access-Control-Allow-Origin: * is set alongside Access-Control-Allow-Credentials: true. '
+                'Browsers reject this combination per the CORS specification, so the immediate visitor '
+                'risk is zero. However, a server that emits both headers is deeply misconfigured and '
+                'likely also reflects arbitrary origins with credentials on non-preflight requests — '
+                'enabling an attacker to read authenticated responses cross-origin. Investigate whether '
+                'the server uses origin reflection elsewhere.'
             ),
             'evidence': f'Access-Control-Allow-Origin: {acao} | Access-Control-Allow-Credentials: {acac}',
         })
