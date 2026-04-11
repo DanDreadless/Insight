@@ -10,6 +10,7 @@ import ResourceList from '../components/results/ResourceList'
 import TechStack from '../components/results/TechStack'
 import DomainInfo from '../components/results/DomainInfo'
 import SourceViewer from '../components/results/SourceViewer'
+import ScreenshotViewer from '../components/results/ScreenshotViewer'
 import LoadingSpinner from '../components/LoadingSpinner'
 
 const VERDICT_STYLES: Record<string, { bg: string; border: string; text: string }> = {
@@ -422,6 +423,13 @@ export default function ScanPage() {
 
       {/* Verdict banner */}
       <VerdictBanner verdict={scan.verdict} url={scan.url} scanTime={scanTime} />
+
+      {/* Screenshot */}
+      {scan.scan_metadata?.screenshot_b64 && (
+        <ScreenshotViewer
+          screenshotB64={scan.scan_metadata.screenshot_b64 as string}
+        />
+      )}
 
       {/* No findings at all */}
       {findings.length === 0 && (

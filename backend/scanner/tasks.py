@@ -129,6 +129,159 @@ def _is_direct_script(url: str, headers: dict) -> bool:
     return ct in _SCRIPT_CONTENT_TYPES
 
 
+# ---------------------------------------------------------------------------
+# Carapace renderer flag → Insight finding conversion
+# ---------------------------------------------------------------------------
+
+# Codes produced as a side-effect of Carapace's sanitisation pipeline.
+# They fire on almost every real page and carry no independent threat signal.
+_CARAPACE_SKIP_CODES: frozenset[str] = frozenset({
+    'BLOCKED_ELEMENT_SCRIPT',   # Carapace always strips <script> tags
+    'BLOCKED_ELEMENT_IFRAME',   # Always stripped
+    'BLOCKED_ELEMENT_OTHER',    # Always stripped
+    'JAVASCRIPT_URL_STRIPPED',  # Very common; stripped as sanitisation
+    'NETWORK_ATTEMPT_BLOCKED',  # All network is blocked by design
+})
+
+_CARAPACE_SEVERITY_MAP: dict[str, str] = {
+    'critical': 'CRITICAL',
+    'high':     'HIGH',
+    'medium':   'MEDIUM',
+    'low':      'LOW',
+}
+
+# (title, analyst-facing description) for each flag code.
+_CARAPACE_FLAG_INFO: dict[str, tuple[str, str]] = {
+    'DRIVE_BY_DOWNLOAD': (
+        'Drive-by download blocked by renderer',
+        'The Carapace renderer intercepted an automatic file download. The file body was never '
+        'written to disk — only the filename, MIME type, and SHA-256 hash were recorded. '
+        'Auto-downloading executables or archives is the primary delivery mechanism for '
+        'drive-by malware attacks.',
+    ),
+    'JS_EVAL_DETECTED': (
+        'Renderer: eval() call detected',
+        'A call to eval() was found during render-phase static analysis. eval() executes '
+        'arbitrary JavaScript from a string, making it the primary mechanism for hiding '
+        'malicious payloads from static analysis tools.',
+    ),
+    'JS_FUNCTION_CONSTRUCTOR': (
+        'Renderer: Function constructor detected',
+        'new Function(code) was found during render-phase analysis. Like eval(), this '
+        'constructs and executes arbitrary code from a string at runtime.',
+    ),
+    'BASE64_OBFUSCATION': (
+        'Renderer: base64-encoded payload detected',
+        'atob() decoding a string literal was detected. The decoded value is in the evidence '
+        'field. Base64 encoding is commonly used to hide URLs, shell commands, and payload '
+        'strings from text-based scanners.',
+    ),
+    'HEX_OBFUSCATION': (
+        'Renderer: hex-escaped string obfuscation',
+        'A string with a high density of \\xNN hex escape sequences was detected — a common '
+        'technique for hiding URLs, shell commands, and payload strings from static scanners.',
+    ),
+    'INNER_HTML_MUTATION': (
+        'Renderer: innerHTML assignment',
+        'A script assigns to innerHTML or outerHTML, which can inject arbitrary HTML and event '
+        'handlers into the DOM. Combined with other flags this indicates DOM-based XSS or '
+        'injected payload delivery.',
+    ),
+    'WEBSOCKET_ATTEMPT': (
+        'Renderer: WebSocket connection attempted',
+        'A WebSocket was constructed in page scripts. WebSocket connections bypass HTTP proxy '
+        'inspection and are a common channel for C2 (command-and-control) communication.',
+    ),
+    'TIMER_STRING_EXEC': (
+        'Renderer: timer string execution',
+        'setTimeout or setInterval was called with a string argument — functionally equivalent '
+        'to eval(). Commonly used to delay payload execution and evade time-based sandbox analysis.',
+    ),
+    'REDIRECT_ATTEMPT': (
+        'Renderer: JavaScript navigation redirect',
+        'A script assigns a URL to window.location or similar. JavaScript redirects are '
+        'commonly used in traffic distribution systems and phishing redirect chains.',
+    ),
+    'DOCUMENT_WRITE': (
+        'Renderer: document.write() usage',
+        'document.write() injects HTML directly into the page and can be used to insert '
+        'hidden iframes, script tags, or redirect elements after the initial page load.',
+    ),
+    'COOKIE_ACCESS': (
+        'Renderer: document.cookie write',
+        'A script writes to document.cookie, potentially setting tracking, session-fixation, '
+        'or data-exfiltration cookies.',
+    ),
+    'EVENT_HANDLER_STRIPPED': (
+        'Renderer: inline event handler stripped',
+        'An inline on* event handler attribute (e.g. onclick, onload) was removed by the '
+        'HTML sanitiser. Inline handlers are used to execute scripts without a <script> tag.',
+    ),
+    'META_REDIRECT_STRIPPED': (
+        'Renderer: meta refresh redirect stripped',
+        'A <meta http-equiv="refresh"> redirect was removed during sanitisation. Meta '
+        'refreshes are used to redirect visitors to phishing pages or malware delivery sites.',
+    ),
+    'SANDBOX_EVASION_WEBDRIVER': (
+        'Sandbox evasion: webdriver detection probe',
+        'A script reads navigator.webdriver — a property that is true in Selenium/WebDriver '
+        'browsers and undefined in real user browsers. No legitimate website reads this. '
+        'Scripts that check for it are designed to serve different content to security '
+        'analysts than to real visitors, making this a strong indicator of intentionally '
+        'evasive malware.',
+    ),
+    'SANDBOX_EVASION_HEADLESS_STRING': (
+        'Sandbox evasion: headless browser identifier in script',
+        'A string literal containing a known headless browser identifier was found in page '
+        'scripts (e.g. "HeadlessChrome", "PhantomJS", "$cdc_"). These strings appear '
+        'exclusively in anti-analysis code that checks for automation artifacts. Legitimate '
+        'websites do not check for these identifiers.',
+    ),
+    'SANDBOX_EVASION_SCREEN_PROBE': (
+        'Sandbox evasion: screen dimension probe',
+        'A script accesses window.outerHeight or window.outerWidth — properties that return '
+        '0 in headless environments. Checking these is a known technique for detecting '
+        'automated analysis environments and serving clean content to scanners.',
+    ),
+    'SANDBOX_EVASION_PLUGINS_PROBE': (
+        'Sandbox evasion: plugin list probe',
+        'A script accesses navigator.plugins. Headless browsers have an empty plugins list; '
+        'real browsers show installed extensions. Checking plugins.length is a common '
+        'technique for distinguishing analysis environments from real users.',
+    ),
+}
+
+
+def _carapace_flags_to_findings(flags: list[dict], url: str) -> list[dict]:
+    """
+    Convert Carapace threat report flags into Insight finding dicts.
+
+    Sanitisation-behaviour codes (those that fire on nearly every real page
+    as a natural side-effect of Carapace's JS/network blocking) are skipped.
+    All remaining flags are surfaced under category='Renderer' so they are
+    clearly distinguishable from Insight's own analysis findings.
+    """
+    findings: list[dict] = []
+    for flag in flags:
+        code = flag.get('code', '')
+        if code in _CARAPACE_SKIP_CODES:
+            continue
+        severity = _CARAPACE_SEVERITY_MAP.get(flag.get('severity', 'low'), 'LOW')
+        title, description = _CARAPACE_FLAG_INFO.get(
+            code,
+            (f'Renderer: {code}', f'Carapace renderer reported: {flag.get("detail", "")}'),
+        )
+        findings.append({
+            'severity': severity,
+            'category': 'Renderer',
+            'title': title,
+            'description': description,
+            'evidence': flag.get('detail', ''),
+            'resource_url': url,
+        })
+    return findings
+
+
 def _detect_cloudflare_challenge(headers: dict, body: str) -> str | None:
     """
     Return a user-facing error message if the response is a Cloudflare challenge
@@ -203,6 +356,7 @@ def run_scan(self, scan_job_id: str) -> dict:
     current_engine_version = get_engine_version()
     scan_start = time.monotonic()
     all_findings: list[dict] = []
+    _carapace: dict | None = None   # populated by Step 3c if Carapace is configured
 
     try:
         url = job.url
@@ -218,7 +372,7 @@ def run_scan(self, scan_job_id: str) -> dict:
 
         # ----------------------------------------------------------------
         # Step 2: Fetch target page (with scheme fallback)
-        _update_progress(job, 1, 6, 'Fetching page', url, 0)
+        _update_progress(job, 1, 7, 'Fetching page', url, 0)
         # If the initial fetch fails, automatically retry with the alternate
         # scheme (https→http or http→https) before giving up.
         # ----------------------------------------------------------------
@@ -418,6 +572,34 @@ def run_scan(self, scan_job_id: str) -> dict:
             return {'verdict': cached_job.verdict, 'cached': True}
 
         # ----------------------------------------------------------------
+        # Step 3c: Visual screenshot via Carapace (best-effort)
+        # Chromium-headless render with JS disabled — gives analysts a
+        # pixel-perfect view of what a real visitor would see.
+        # Runs after the cache check so cache hits reuse the existing
+        # screenshot stored in the canonical job's scan_metadata.
+        # Failures are swallowed — the scan continues without a screenshot.
+        # ----------------------------------------------------------------
+        from scanner.modules.carapace_client import capture_screenshot
+        _update_progress(job, 2, 7, 'Capturing visual screenshot', final_url, 0)
+        _carapace = capture_screenshot(final_url)
+        if _carapace:
+            logger.info(
+                '[scan:%s] Carapace screenshot: risk=%d, flags=%d',
+                scan_job_id, _carapace['carapace_risk'], len(_carapace.get('carapace_flags', [])),
+            )
+            renderer_findings = _carapace_flags_to_findings(
+                _carapace.get('carapace_flags', []), final_url
+            )
+            if renderer_findings:
+                logger.info(
+                    '[scan:%s] Carapace contributed %d renderer finding(s)',
+                    scan_job_id, len(renderer_findings),
+                )
+                all_findings.extend(renderer_findings)
+        else:
+            logger.info('[scan:%s] Carapace screenshot: unavailable', scan_job_id)
+
+        # ----------------------------------------------------------------
         # Step 3b: robots.txt check
         # ----------------------------------------------------------------
         logger.info('[scan:%s] Step 3b: Checking robots.txt', scan_job_id)
@@ -561,6 +743,8 @@ def run_scan(self, scan_job_id: str) -> dict:
                 'download_truncated': truncated,
                 'findings_count': len(all_findings),
                 'engine_version': current_engine_version,
+                'screenshot_b64': _carapace['screenshot_b64'] if _carapace else '',
+                'screenshot_carapace_risk': _carapace['carapace_risk'] if _carapace else 0,
             }
             job.error_message = ''
             job.detection_engine_version = current_engine_version
@@ -581,7 +765,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # because the WHOIS query is the dominant wait time in this phase —
         # the user sees an accurate label for the ~5–10s it takes.
         # ----------------------------------------------------------------
-        _update_progress(job, 2, 6, 'Resolving domain & detecting technologies', final_url, len(all_findings))
+        _update_progress(job, 3, 7, 'Resolving domain & detecting technologies', final_url, len(all_findings))
         logger.info('[scan:%s] WHOIS lookup for %s', scan_job_id, _get_client_ip_from_url(final_url))
         whois_data: dict | None = None
         try:
@@ -598,10 +782,24 @@ def run_scan(self, scan_job_id: str) -> dict:
         except Exception as exc:
             logger.warning('[scan:%s] Tech detection error: %s', scan_job_id, exc)
 
+        # Merge Carapace's browser-grade tech detections into the list.
+        # Carapace uses a spec-correct DOM parser and full attribute/class walk,
+        # so it catches things BeautifulSoup-based detection can miss.
+        if _carapace and _carapace.get('carapace_tech'):
+            existing_names = {t['name'] for t in detected_technologies}
+            for tech in _carapace['carapace_tech']:
+                if tech.get('name') and tech['name'] not in existing_names:
+                    detected_technologies.append(tech)
+                    existing_names.add(tech['name'])
+            logger.info(
+                '[scan:%s] Tech stack after Carapace merge: %d technologies',
+                scan_job_id, len(detected_technologies),
+            )
+
         # ----------------------------------------------------------------
         # Step 4b: Header analysis
         # ----------------------------------------------------------------
-        _update_progress(job, 3, 6, 'Analysing headers & SSL', final_url, len(all_findings))
+        _update_progress(job, 4, 7, 'Analysing headers & SSL', final_url, len(all_findings))
         logger.info('[scan:%s] Analysing headers', scan_job_id)
         header_findings = header_analyser.analyse_headers(response_headers, final_url, status_code)
         for f in header_findings:
@@ -634,7 +832,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         # Step 4c: Domain intelligence
         # ----------------------------------------------------------------
-        _update_progress(job, 4, 6, 'Analysing domain & HTML', final_url, len(all_findings))
+        _update_progress(job, 5, 7, 'Analysing domain & HTML', final_url, len(all_findings))
         logger.info('[scan:%s] Analysing domain', scan_job_id)
         domain_findings = domain_intelligence.analyse_domain(final_url, whois_data=whois_data)
         for f in domain_findings:
@@ -668,7 +866,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         scripts_skipped_budget = 0
         scripts_total = len(scripts)
 
-        _update_progress(job, 5, 6, f'Analysing scripts (0/{scripts_total})', final_url, len(all_findings))
+        _update_progress(job, 6, 7,f'Analysing scripts (0/{scripts_total})', final_url, len(all_findings))
 
         for script in scripts:
             if processed >= max_resources:
@@ -686,7 +884,7 @@ def run_scan(self, scan_job_id: str) -> dict:
             if script.get('inline'):
                 content = script.get('content', '')
                 if content and content.strip():
-                    _update_progress(job, 5, 6, f'Analysing script {processed + 1}/{scripts_total}', final_url, len(all_findings))
+                    _update_progress(job, 6, 7,f'Analysing script {processed + 1}/{scripts_total}', final_url, len(all_findings))
                     logger.info('[scan:%s] Analysing inline script', scan_job_id)
                     try:
                         js_findings = js_analyser.analyse_js(content, final_url)
@@ -703,7 +901,7 @@ def run_scan(self, scan_job_id: str) -> dict:
                 if is_known_good(script_url):
                     logger.info('[scan:%s] Skipping known-good script: %s', scan_job_id, script_url)
                     continue
-                _update_progress(job, 5, 6, f'Analysing script {processed + 1}/{scripts_total}', script_url, len(all_findings))
+                _update_progress(job, 6, 7,f'Analysing script {processed + 1}/{scripts_total}', script_url, len(all_findings))
                 logger.info('[scan:%s] Fetching external script: %s', scan_job_id, script_url)
                 try:
                     script_response = fetch(script_url, max_size_bytes=1 * 1024 * 1024)
@@ -743,7 +941,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         # ----------------------------------------------------------------
         # Step 5: Deduplicate, context collapse, sort
         # ----------------------------------------------------------------
-        _update_progress(job, 6, 6, 'Finalising results', final_url, len(all_findings))
+        _update_progress(job, 7, 7, 'Finalising results', final_url, len(all_findings))
         all_findings = scorer.deduplicate_findings(all_findings)
         all_findings = scorer.context_collapse_check(all_findings)
         all_findings = scorer.sort_findings(all_findings)
@@ -811,6 +1009,9 @@ def run_scan(self, scan_job_id: str) -> dict:
             'findings_count': len(all_findings),
             'detected_technologies': detected_technologies,
             'whois_data': whois_data,
+            # Carapace visual render — empty string means screenshot unavailable.
+            'screenshot_b64': _carapace['screenshot_b64'] if _carapace else '',
+            'screenshot_carapace_risk': _carapace['carapace_risk'] if _carapace else 0,
         }
 
         now = django_timezone.now()
