@@ -25,6 +25,22 @@ A companion tool to [vault1337.com](https://vault1337.com). Shares the same desi
 | Frontend | React 19 / TypeScript / Vite / Tailwind CSS 4 |
 | Database | PostgreSQL (production) / SQLite (development) |
 | Cache / Broker | Redis |
+| Visual Renderer | [Carapace](https://github.com/DanDreadless/Carapace) (Rust) |
+
+---
+
+## Carapace Integration
+
+Insight uses [Carapace](https://github.com/DanDreadless/Carapace) as its visual rendering engine. When a scan runs, Carapace fetches and renders the target URL in a hardened Chromium headless environment with JavaScript fully disabled and all outbound network requests blocked. The result is returned to Insight alongside additional threat signals.
+
+**What Carapace adds to every scan:**
+
+- A screenshot of the page as a visitor would see it, captured without executing any JavaScript
+- Additional threat flags from static JS analysis (eval chains, obfuscation, exfiltration calls, sandbox evasion probes, drive-by download detection)
+- An extended technology stack — detected from the pre-sanitisation DOM before framework-specific attributes are stripped, giving higher accuracy than header-only detection
+- Risk scoring that feeds into the overall scan verdict
+
+Carapace runs as a sandboxed Docker sidecar (`--cap-drop=ALL`, non-root, network kill-switch). The screenshot is displayed on the results page and collapsed by default.
 
 ---
 
@@ -150,6 +166,7 @@ Copy `.env.sample` to `.env` in the repo root. The only required change for loca
 | `RATE_LIMIT_SCANS_PER_HOUR` | `5` | Per IP |
 | `MAX_SCAN_RESOURCES` | `50` | External scripts analysed per scan |
 | `SCAN_TIMEOUT_SECONDS` | `60` | Hard Celery task limit |
+| `CARAPACE_URL` | *(unset)* | URL of the Carapace API (`http://carapace:8080` when using Docker Compose). Screenshots and additional threat flags are skipped if unset. |
 
 ### Full stack via Docker
 
