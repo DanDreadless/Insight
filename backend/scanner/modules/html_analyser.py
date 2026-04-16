@@ -515,7 +515,7 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
         len(str(tag)) for tag in soup.find_all('script')
     )
     non_script_size = max(full_html_len - script_tag_size, 1)
-    if total_inline_script_size > 3 * non_script_size:
+    if total_inline_script_size > 3 * non_script_size and not is_known_good(page_url):
         _script_snippets = []
         for _s in inline_scripts:
             _c = _s.get('content', '').strip()

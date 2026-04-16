@@ -350,8 +350,9 @@ def run_scan(target_url, verbose=True):
     # Skip inline scripts above PLATFORM_INLINE_SKIP_BYTES; small ones (<4 KB)
     # are still checked since they could be user-injected code.
     _is_platform_page = (
-        len(external_scripts) == 0
-        and any(is_site_builder_cdn(s['url']) for s in skipped)
+        (len(external_scripts) == 0
+         and any(is_site_builder_cdn(s['url']) for s in skipped))
+        or is_known_good(final_url)
     )
     platform_inline_skipped = 0
     if _is_platform_page:
@@ -441,7 +442,7 @@ def run_scan(target_url, verbose=True):
     # Discovers the running container automatically via docker inspect.
     # Falls back silently if Carapace is not running or unreachable.
     _carapace_url = _discover_carapace_url()
-    if _carapace_url:
+    if _carapace_url and not is_known_good(final_url):
         if verbose:
             print("\n[Renderer] Carapace visual analysis...")
         try:

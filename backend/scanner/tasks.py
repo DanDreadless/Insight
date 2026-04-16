@@ -443,15 +443,18 @@ def run_scan(self, scan_job_id: str) -> dict:
                 '[scan:%s] Carapace screenshot: risk=%d, flags=%d',
                 scan_job_id, _carapace['carapace_risk'], len(_carapace.get('carapace_flags', [])),
             )
-            renderer_findings = _carapace_flags_to_findings(
-                _carapace.get('carapace_flags', []), final_url
-            )
-            if renderer_findings:
-                logger.info(
-                    '[scan:%s] Carapace contributed %d renderer finding(s)',
-                    scan_job_id, len(renderer_findings),
+            # Skip Renderer threat findings for known-good platform hosts (X.com, LinkedIn, etc.)
+            # Their legitimate JS bundles trigger false positives (new Function, cookie writes).
+            if not is_known_good(final_url):
+                renderer_findings = _carapace_flags_to_findings(
+                    _carapace.get('carapace_flags', []), final_url
                 )
-                all_findings.extend(renderer_findings)
+                if renderer_findings:
+                    logger.info(
+                        '[scan:%s] Carapace contributed %d renderer finding(s)',
+                        scan_job_id, len(renderer_findings),
+                    )
+                    all_findings.extend(renderer_findings)
         else:
             logger.info('[scan:%s] Carapace screenshot: unavailable', scan_job_id)
 
@@ -727,8 +730,9 @@ def run_scan(self, scan_job_id: str) -> dict:
         _external_scripts_on_page = [s for s in scripts if not s.get('inline') and s.get('url')]
         _unknown_externals = [s for s in _external_scripts_on_page if not is_known_good(s['url'])]
         _is_platform_page = (
-            not _unknown_externals
-            and any(is_site_builder_cdn(s['url']) for s in _external_scripts_on_page if s.get('url'))
+            (not _unknown_externals
+             and any(is_site_builder_cdn(s['url']) for s in _external_scripts_on_page if s.get('url')))
+            or is_known_good(final_url)
         )
         if _is_platform_page:
             _before = len(scripts)
