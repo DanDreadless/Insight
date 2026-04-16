@@ -1,0 +1,176 @@
+# Production docker-compose for self-hosted Pi deployment.
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Before first run:
+#   1. Copy .env.sample to .env and fill in all values (see comments below)
+#   2. If using Let's Encrypt: run certbot first, mount certs into nginx
+#   3. If using Cloudflare Tunnel: set up cloudflared separately (see README)
+#   4. Clone the Carapace repo alongside this repo:
+#        git clone https://github.com/DanDreadless/Carapace ../Carapace
+#
+# Build the frontend image separately (VITE_API_BASE_URL must be set at
+# build time because Vite bakes it into the static bundle):
+#   docker compose -f docker-compose.prod.yml build \
+#     --build-arg VITE_API_BASE_URL=https://YOURDOMAIN.COM frontend
+
+networks:
+  # Public-facing network: nginx, frontend, backend
+  public:
+  # Internal-only network: backend, celery, redis, db, carapace
+  # Redis and Carapace are never reachable from the nginx/frontend network.
+  internal:
+
+volumes:
+  postgres_data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Nginx — TLS termination and reverse proxy
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Let's Encrypt certificates — not needed if using Cloudflare Tunnel
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - public
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend — static React build served by Nginx
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # Must match the public URL where the backend API is reachable
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    networks:
+      - public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Backend — Django/gunicorn (gevent workers for SSE)
+  # ---------------------------------------------------------------------------
+  backend:
+    build: ./backend
+    # No ports: — backend is only reachable via Nginx on the public network,
+    # and via the internal network by celery. Never exposed on the host.
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - REDIS_URL=redis://redis:6379/0
+      - CARAPACE_URL=http://carapace:8080
+      # ALLOWED_HOSTS must include your public domain — set in .env
+    networks:
+      - public
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Celery worker
+  # ---------------------------------------------------------------------------
+  celery:
+    build: ./backend
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - REDIS_URL=redis://redis:6379/0
+      - CARAPACE_URL=http://carapace:8080
+    command: celery -A insight worker -l info --concurrency 2
+    networks:
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      carapace:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — production database
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: insight
+      POSTGRES_USER: insight
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # No ports: — never exposed on the host
+    networks:
+      - internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insight"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Redis — Celery broker + rate-limit cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    # No ports: — never exposed on the host
+    networks:
+      - internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Carapace — screenshot service
+  # Requires the Carapace repo cloned at ../Carapace (sibling of this repo).
+  # If Carapace is not available, remove this service and unset CARAPACE_URL
+  # in .env — screenshots will be disabled but scanning still works.
+  # ---------------------------------------------------------------------------
+  carapace:
+    build: ../Carapace
+    environment:
+      - CARAPACE_API_KEY=${CARAPACE_API_KEY}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    command: ["serve", "--port", "8080", "--max-concurrent", "2"]
+    networks:
+      - internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

@@ -125,6 +125,10 @@ _ABUSE_HOSTING_PLATFORMS: dict[str, str] = {
     'pages.dev':       'Cloudflare Pages',
     'web.app':         'Firebase Hosting',
     'firebaseapp.com': 'Firebase Hosting',
+    'zapier.app':      'Zapier no-code automation',
+    'glitch.me':       'Glitch live coding platform',
+    'onrender.com':    'Render cloud platform',
+    'repl.co':         'Replit online IDE',
 }
 
 
@@ -580,5 +584,71 @@ def analyse_domain(url: str, whois_data: dict | None = None) -> list[dict]:
                     })
             except (ValueError, TypeError):
                 pass  # Malformed or redacted WHOIS date — skip silently
+
+    # ------------------------------------------------------------------
+    # 11. Dot-to-hyphen encoded domain in subdomain
+    # ------------------------------------------------------------------
+    # Pattern: subdomain ends with a hyphen-separated TLD token such as
+    # "-com", "-net", "-org" — a domain name with dots replaced by hyphens.
+    #
+    # Example: "support-netcoin-com.zapier.app" encodes "support.netcoin.com".
+    #
+    # This is a textbook phishing-as-a-service technique: attackers use free
+    # subdomain hosting (Zapier, GitHub Pages, Vercel, Netlify, etc.) to
+    # create lookalike URLs.  Users scanning the URL quickly may read the
+    # leftmost subdomain token as the authoritative domain name.
+    #
+    # The TLD token at the end is the structural tell — legitimate vanity
+    # subdomains almost never end with "-com", "-net", etc.
+    # ------------------------------------------------------------------
+    # Only include well-established ccTLDs and gTLDs that are unambiguous as
+    # domain suffixes.  Short generic words like 'io', 'co', 'app', 'dev' are
+    # deliberately excluded: they appear legitimately as descriptive subdomain
+    # components (e.g. 'react-todo-app.netlify.app', 'my-project-io.vercel.app')
+    # and would generate excessive false positives.
+    _ENCODED_TLDS = {
+        'com', 'net', 'org',
+        'uk', 'us', 'de', 'fr', 'au', 'ca', 'eu',
+        'ru', 'cn', 'jp', 'br', 'in', 'nl', 'pl', 'it', 'es',
+    }
+    if subdomain:
+        # The subdomain may itself have dots (e.g. "api.support-netcoin-com")
+        # — check the leftmost label which is the attacker-chosen part.
+        leftmost = subdomain.split('.')[0].lower()
+        parts = leftmost.split('-')
+        if len(parts) >= 2 and parts[-1] in _ENCODED_TLDS:
+            core = '-'.join(parts[:-1])  # everything before the TLD token
+            if len(core) >= 4:           # ignore single-char stems like "x-com"
+                encoded_tld = parts[-1]
+                decoded_domain = '.'.join(parts)  # reconstruct the impersonated domain
+                on_abuse_platform = registrable in _ABUSE_HOSTING_PLATFORMS
+                severity = 'HIGH' if on_abuse_platform else 'MEDIUM'
+                platform_note = (
+                    f' This page is hosted on {_ABUSE_HOSTING_PLATFORMS[registrable]} '
+                    f'({registrable}), a free platform where attackers create pages at no cost '
+                    'and with no identity verification.'
+                    if on_abuse_platform else ''
+                )
+                findings.append({
+                    'severity': severity,
+                    'category': 'Domain',
+                    'title': f'Subdomain encodes a domain via dot-to-hyphen substitution: {decoded_domain}',
+                    'description': (
+                        f'The subdomain "{leftmost}" is a domain name with dots replaced by hyphens — '
+                        f'it encodes "{decoded_domain}". '
+                        'Attackers use free subdomain hosting to create lookalike URLs where the '
+                        'impersonated brand appears in the leftmost subdomain position, exploiting '
+                        'the user habit of scanning only the start of a URL for legitimacy. '
+                        f'The subdomain ending in "-{encoded_tld}" is the structural tell: '
+                        'legitimate vanity subdomains do not embed a TLD token.'
+                        + platform_note
+                    ),
+                    'evidence': (
+                        f'Full hostname     : {hostname}\n'
+                        f'Subdomain         : {leftmost}  ← dot-to-hyphen encoded domain\n'
+                        f'Decoded as        : {decoded_domain}\n'
+                        f'Registered domain : {registrable}'
+                    ),
+                })
 
     return findings

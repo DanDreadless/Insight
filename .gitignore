@@ -110,6 +110,28 @@ desktop.ini
 # Docker
 *.log
 
+# Production deployment — local overrides and cert files
+# docker-compose.prod.yml and nginx/nginx.conf.sample ARE committed intentionally.
+# nginx/nginx.conf is gitignored — copy from nginx.conf.sample and fill in your domain.
+docker-compose.override.yml
+docker-compose.local.yml
+nginx/nginx.conf
+nginx/certs/
+nginx/*.crt
+nginx/*.pem
+nginx/*.key
+
+# Cloudflare Tunnel credential files (contain tunnel secrets — never commit)
+# cloudflared stores these in ~/.cloudflared/ by default but devs sometimes
+# copy them into the project directory.
+cloudflared.yml
+tunnel.yml
+.cloudflared/
+# Exclude *.json broadly but re-allow package files
+*.json
+!package.json
+!package-lock.json
+
 # Django / Gunicorn runtime files
 backend/staticfiles/
 backend/media/

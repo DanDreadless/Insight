@@ -1,0 +1,106 @@
+# Insight — production Nginx reverse proxy
+#
+# Terminates TLS (if using direct port-forward + Let's Encrypt).
+# If using Cloudflare Tunnel, remove the ssl_* lines and the port 443 block;
+# Cloudflare handles TLS and the tunnel connects on HTTP internally.
+
+# Adjust worker_processes to match the Pi's core count (Pi 5 = 4 cores)
+worker_processes auto;
+
+events {
+    worker_connections 512;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # Hide Nginx version from error pages and headers
+    server_tokens off;
+
+    # -----------------------------------------------------------------------
+    # Security headers applied to all responses
+    # -----------------------------------------------------------------------
+    add_header X-Content-Type-Options  "nosniff"         always;
+    add_header X-Frame-Options         "SAMEORIGIN"      always;
+    add_header Referrer-Policy         "strict-origin"   always;
+
+    # -----------------------------------------------------------------------
+    # Rate limiting — protect the scan API from abuse
+    # 10 requests/minute per IP on /api/scan/ (POST).
+    # Adjust burst to your expected legitimate traffic.
+    # -----------------------------------------------------------------------
+    limit_req_zone $binary_remote_addr zone=scan_limit:10m rate=10r/m;
+
+    # -----------------------------------------------------------------------
+    # HTTP → HTTPS redirect
+    # Remove this block entirely if using Cloudflare Tunnel (CF handles TLS).
+    # -----------------------------------------------------------------------
+    server {
+        listen 80;
+        server_name _;
+        return 301 https://$host$request_uri;
+    }
+
+    # -----------------------------------------------------------------------
+    # Main HTTPS server
+    # Replace YOURDOMAIN.COM with your actual domain in both places.
+    # Remove the ssl_* lines and change listen to "listen 80;" if using
+    # Cloudflare Tunnel (the tunnel connects here via plain HTTP internally).
+    # -----------------------------------------------------------------------
+    server {
+        listen 443 ssl;
+        server_name YOURDOMAIN.COM;
+
+        # --- TLS (Let's Encrypt / Certbot) ---
+        # Not needed if using Cloudflare Tunnel.
+        ssl_certificate     /etc/letsencrypt/live/YOURDOMAIN.COM/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/YOURDOMAIN.COM/privkey.pem;
+        ssl_protocols       TLSv1.2 TLSv1.3;
+        ssl_ciphers         HIGH:!aNULL:!MD5;
+        ssl_session_cache   shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        # HSTS — tell browsers to always use HTTPS for this domain
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+
+        # --- Frontend (React static build) ---
+        location / {
+            proxy_pass         http://frontend:80;
+            proxy_set_header   Host $host;
+            proxy_set_header   X-Real-IP $remote_addr;
+            proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+
+        # --- Backend API (general) ---
+        location /api/ {
+            proxy_pass         http://backend:8000;
+            proxy_set_header   Host $host;
+            proxy_set_header   X-Real-IP $remote_addr;
+            proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+
+            # SSE streaming — disable buffering so progress events reach the
+            # browser immediately rather than being held until the buffer fills.
+            proxy_buffering    off;
+            proxy_cache        off;
+            proxy_read_timeout 320s;  # slightly longer than gunicorn --timeout 300
+        }
+
+        # --- Scan submission — rate limited ---
+        # Scope rate limiting to POST /api/scan/ only so health checks,
+        # status polls, and history requests are never throttled.
+        location = /api/scan/ {
+            proxy_pass         http://backend:8000;
+            proxy_set_header   Host $host;
+            proxy_set_header   X-Real-IP $remote_addr;
+            proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_buffering    off;
+            proxy_read_timeout 320s;
+
+            limit_req zone=scan_limit burst=5 nodelay;
+        }
+    }
+}

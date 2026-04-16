@@ -213,6 +213,20 @@ CAPTCHA_DOMAINS: frozenset[str] = frozenset({
     'funcaptcha.com',         # FunCaptcha (Arkose)
 })
 
+# No-code / automation / app-builder platforms.
+# These platforms serve their own framework code (Next.js chunks, SDK files)
+# from platform-owned CDN subdomains.  Marking the CDN domain as known-good
+# suppresses false positives from framework code (webpack bundles, etc.)
+# that legitimately use patterns like createElement/script/appendChild.
+# Note: this does NOT skip analysis of inline scripts on pages hosted at
+# these platforms — only external scripts loaded from the platform CDN.
+NOCODE_DOMAINS: frozenset[str] = frozenset({
+    'zapier.com',             # Zapier automation platform CDN (interfaces.zapier.com)
+    'typeform.com',           # Typeform form builder
+    'webflow.com',            # Webflow site builder
+    'webflowcdn.com',         # Webflow CDN
+})
+
 # ---------------------------------------------------------------------------
 # Combined lookup set
 # ---------------------------------------------------------------------------
@@ -227,6 +241,7 @@ ALL_KNOWN_GOOD: frozenset[str] = (
     | SUPPORT_DOMAINS
     | MARKETING_DOMAINS
     | CAPTCHA_DOMAINS
+    | NOCODE_DOMAINS
 )
 
 

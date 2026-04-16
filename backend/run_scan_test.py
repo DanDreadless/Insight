@@ -139,7 +139,11 @@ def fetch_and_analyse_script(url):
     else:
         js_sample = js_text
 
-    findings = js_analyser.analyse_js(js_sample, url)
+    # Skip beautification for external scripts — jsbeautifier is CPU-bound and
+    # Python's re module holds the GIL, so a single problematic webpack chunk
+    # can block the 60s phase timeout from ever firing. Detection is unaffected:
+    # all 30 checks work on raw minified JS. Inline scripts retain beautification.
+    findings = js_analyser.analyse_js(js_sample, url, beautify=False)
     for f in findings:
         f['resource_url'] = url
     return url, findings, size_kb

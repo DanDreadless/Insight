@@ -359,7 +359,8 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
             # cannot make the evidence block appear to be a different finding.
             def _esc(s: str) -> str:
                 return str(s).replace('"', '&quot;').replace('\n', ' ').replace('\r', ' ')
-            tag_repr = f'<iframe src="{_esc(url)}" {" ".join(f"{k}=\"{_esc(v)}\"" for k, v in attrs.items())}>'
+            attrs_str = " ".join(f'{k}="{_esc(v)}"' for k, v in attrs.items())
+            tag_repr = f'<iframe src="{_esc(url)}" {attrs_str}>'
             findings.append({
                 'severity': 'HIGH',
                 'category': 'HTML',
