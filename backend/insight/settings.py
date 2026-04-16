@@ -118,7 +118,10 @@ except Exception:
 
 # SEC-11: Warn if production Redis is not using TLS + auth.
 # In production, set REDIS_URL=rediss://:password@host:6380/0
-if not DEBUG and not REDIS_URL.startswith('rediss://'):
+# For self-hosted deployments where Redis is internal (container-to-container),
+# set REDIS_INTERNAL=true in .env to suppress this warning.
+if not DEBUG and not REDIS_URL.startswith('rediss://') and \
+        not os.environ.get('REDIS_INTERNAL', '').lower() == 'true':
     import warnings as _warnings
     _warnings.warn(
         'SEC-11: REDIS_URL is not using TLS (rediss://). '

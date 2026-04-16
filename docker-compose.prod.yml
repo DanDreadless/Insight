@@ -103,7 +103,7 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
       - REDIS_URL=redis://redis:6379/0
       - CARAPACE_URL=http://carapace:8080
-    command: celery -A insight worker -l info --concurrency 2
+    command: celery -A insight worker -l info --concurrency 4
     networks:
       - internal
     depends_on:
