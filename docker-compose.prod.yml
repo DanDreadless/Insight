@@ -142,6 +142,7 @@ services:
   redis:
     image: redis:7-alpine
     # No ports: — never exposed on the host
+    mem_limit: 256m
     networks:
       - internal
     restart: unless-stopped
