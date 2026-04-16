@@ -1996,6 +1996,101 @@ def _check_decrypt_exec(js: str) -> list[dict]:
     return findings
 
 
+def _check_xor_string_array_obfuscation(js: str) -> list[dict]:
+    """
+    Detects polymorphic XOR byte-encoded string array obfuscation.
+
+    The pattern: a JS array of 8+ hex-encoded strings (each entry consists of
+    pairs of hex digits representing XOR'd ASCII bytes) combined with a decode
+    function that uses parseInt(s.substr(j,2),16)^KEY.  This encodes all API
+    endpoints, method names, and redirect URLs to defeat static analysis.
+
+    Used by TDS/cloaking malware — biometrie-sante-carte.com campaign (Apr 2026).
+    The obfuscation key and variable names are randomised per request (polymorphic),
+    so checking for a fixed variable name like _0x is insufficient.
+    """
+    findings: list[dict] = []
+
+    # Require the XOR decode idiom: parseInt(expr, 16) ^ variable
+    # Use lazy .{1,80}? to handle nested-call args like s.substr(j,2)
+    if not re.search(r'parseInt\s*\(.{1,80}?,\s*16\)\s*\^\s*\w+', js, re.IGNORECASE | re.DOTALL):
+        return findings
+
+    # Look for an array containing 8+ hex-only even-length strings (byte pairs)
+    array_re = re.compile(r"var\s+\w+\s*=\s*\[([^\]]{50,})\]", re.DOTALL)
+    hex_str_re = re.compile(r"'([0-9a-fA-F]{4,})'")
+    for m in array_re.finditer(js):
+        candidates = hex_str_re.findall(m.group(1))
+        valid = [s for s in candidates if len(s) % 2 == 0 and re.fullmatch(r'[0-9a-fA-F]+', s)]
+        if len(valid) >= 8:
+            findings.append({
+                'severity': 'HIGH',
+                'category': 'JavaScript',
+                'title': f'Polymorphic XOR string-array obfuscation ({len(valid)} encoded strings)',
+                'description': (
+                    f'Script contains an array of {len(valid)} XOR byte-encoded strings paired with a '
+                    'decode function using parseInt(s.substr(j,2),16)^KEY.  This technique encodes all '
+                    'API endpoints, JS method names, and redirect URLs to hide them from static analysis. '
+                    'It is characteristic of Traffic Direction Systems (TDS) and cloaking malware that '
+                    'fingerprint visitors and redirect real users to phishing or malware infrastructure '
+                    'while showing clean content to automated crawlers and scanners.  The obfuscation '
+                    'key and variable names are randomised per request (polymorphic).'
+                ),
+                'evidence': m.group(0)[:600],
+            })
+            break
+    return findings
+
+
+def _check_tds_fingerprint_redirect(js: str) -> list[dict]:
+    """
+    Detects Traffic Direction System (TDS) / server-response-based cloaking.
+
+    Visitor fingerprint data (navigator.userAgent, navigator.language) is
+    collected and POSTed to a remote server via fetch().  Based on the JSON
+    response, the server decides whether to redirect the visitor to attack
+    infrastructure (phishing, malware) or return them to a clean page.  This
+    makes the redirect destination invisible to static analysis — it only
+    appears at runtime for real user sessions.
+
+    All five structural tokens (navigator fingerprint, fetch, JSON, .then chain,
+    window redirect) must be present in the same script to fire.
+    False-positive rate: near zero — this combination does not appear in
+    legitimate single-page applications.
+    """
+    findings: list[dict] = []
+
+    has_fingerprint = bool(re.search(r'navigator\s*\.\s*(?:userAgent|language|platform)', js, re.IGNORECASE))
+    has_fetch = bool(re.search(r'\bfetch\s*\(', js))
+    has_then = bool(re.search(r'\.then\s*\(', js))
+    has_json = bool(re.search(r'\bJSON\s*[\.\[]', js))
+    # Covers both dot-notation and bracket-notation (obfuscated) window redirects
+    has_window_assign = bool(re.search(
+        r'window(?:\.location|\s*\[[^\]]+\])(?:\.href|\.replace|\s*\[[^\]]+\])?\s*=(?!=)',
+        js, re.IGNORECASE,
+    ))
+
+    if has_fingerprint and has_fetch and has_then and has_json and has_window_assign:
+        fetch_m = re.search(r'\bfetch\s*\([^;]{0,300}', js, re.DOTALL)
+        evidence = fetch_m.group(0)[:400].strip() if fetch_m else '(fetch call obfuscated)'
+        findings.append({
+            'severity': 'HIGH',
+            'category': 'JavaScript',
+            'title': 'Traffic Direction System (TDS): server-response-based cloaking redirect',
+            'description': (
+                'Script collects browser fingerprint data (navigator.userAgent / navigator.language) '
+                'and POSTs it to a remote server via fetch(), then assigns window.location based on '
+                'the server\'s JSON response.  This is the signature of a Traffic Direction System '
+                '(TDS) / cloaking attack: the server distinguishes real users from bots and redirects '
+                'victims to phishing or malware pages while returning a clean page to automated '
+                'scanners.  The redirect destination is controlled entirely by the server and is '
+                'never present in the page source, defeating static analysis.'
+            ),
+            'evidence': evidence,
+        })
+    return findings
+
+
 def _check_dynamic_import_external(js: str) -> list[dict]:
     """
     Detect dynamic import() calls loading from external absolute URLs.
@@ -2119,6 +2214,8 @@ def analyse_js(js_content: str, source_url: str = '', beautify: bool = True) -> 
         add_findings(_check_fetch_eval(js))
         add_findings(_check_decrypt_exec(js))
         add_findings(_check_dynamic_import_external(js))
+        add_findings(_check_xor_string_array_obfuscation(js))
+        add_findings(_check_tds_fingerprint_redirect(js))
 
     # Sort by severity
     findings.sort(key=_sev_key)

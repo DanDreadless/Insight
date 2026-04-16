@@ -302,5 +302,42 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
                 'evidence': 'Newly registered domain (<30 days) + high-risk TLD combination',
             })
 
+    # Context 8: TDS cloaking redirect + polymorphic obfuscation
+    # A Traffic Direction System that hides its API endpoint and redirect URLs
+    # behind per-request XOR obfuscation is purpose-built attack infrastructure.
+    # No legitimate website uses both patterns together.  The obfuscation exists
+    # solely to prevent static scanners from seeing the destination URL, confirming
+    # the operator knows the destination is malicious.
+    has_tds = _has_title_fragment('traffic direction system')
+    has_xor_obfuscation = _has_title_fragment('polymorphic xor')
+    if has_tds and has_xor_obfuscation:
+        if not any(f.get('title') == 'Context collapse: TDS cloaking with polymorphic obfuscation' for f in findings):
+            trigger_parts: list[str] = []
+            for f in findings:
+                title = f.get('title', '').lower()
+                if 'traffic direction system' in title or 'polymorphic xor' in title:
+                    label = f.get('title', '')
+                    ev = f.get('evidence', '').strip()
+                    trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
+            evidence_block = '\n\n'.join(trigger_parts) if trigger_parts else (
+                'TDS cloaking redirect + polymorphic XOR obfuscation detected'
+            )
+            synthetic.append({
+                'severity': 'CRITICAL',
+                'category': 'Threat',
+                'title': 'Context collapse: TDS cloaking with polymorphic obfuscation',
+                'description': (
+                    'A Traffic Direction System (TDS) combined with polymorphic XOR string-array '
+                    'obfuscation confirms purpose-built malicious delivery infrastructure. '
+                    'The TDS fingerprints every visitor and redirects real users to attack '
+                    'infrastructure (phishing, malware) while showing a clean page to scanners. '
+                    'The polymorphic obfuscation — where the XOR key and all variable names are '
+                    'randomised per request — exists specifically to hide the destination URL from '
+                    'static analysis. No legitimate website uses both patterns together. '
+                    'The redirect destination is server-controlled and never present in the page source.'
+                ),
+                'evidence': evidence_block,
+            })
+
     findings.extend(synthetic)
     return findings
