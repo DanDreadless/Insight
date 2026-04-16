@@ -425,7 +425,7 @@ export default function ScanPage() {
       <VerdictBanner verdict={scan.verdict} url={scan.url} scanTime={scanTime} />
 
       {/* Screenshot */}
-      {scan.scan_metadata?.screenshot_b64 && (
+      {!!scan.scan_metadata?.screenshot_b64 && (
         <ScreenshotViewer
           screenshotB64={scan.scan_metadata.screenshot_b64 as string}
         />
