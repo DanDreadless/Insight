@@ -1,4 +1,4 @@
-Django==5.2.12
+Django==5.2.13
 djangorestframework==3.16.1
 django-cors-headers==4.7.0
 djangorestframework-simplejwt==5.5.1
@@ -13,7 +13,7 @@ lxml==6.0.2
 tldextract==5.3.1
 dnspython==2.7.0
 pyOpenSSL==26.0.0
-cryptography==46.0.6
+cryptography==46.0.7
 python-whois==0.9.6
 jsbeautifier==1.15.1
 celery[redis]==5.4.0
