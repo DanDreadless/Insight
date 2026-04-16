@@ -54,6 +54,42 @@ TARGET_URL = 'https://www.cloudretouch.com'
 
 CASES_PATH = os.path.join(os.path.dirname(__file__), 'feedback', 'cases.json')
 
+# ---------------------------------------------------------------------------
+# Carapace renderer integration (optional)
+# ---------------------------------------------------------------------------
+
+def _discover_carapace_url() -> str | None:
+    """
+    Return a reachable Carapace base URL, or None if unavailable.
+
+    Resolution order:
+    1. CARAPACE_URL env var (explicit override)
+    2. Docker inspect on the known container name → use bridge IP directly
+       (works on Linux — the Pi runs Docker natively, bridge IPs are routable)
+    """
+    env_url = os.environ.get('CARAPACE_URL', '').rstrip('/')
+    if env_url:
+        return env_url
+
+    import subprocess
+    try:
+        result = subprocess.run(
+            [
+                'docker', 'inspect',
+                '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}',
+                'insight_vault1337-carapace-1',
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        ip = result.stdout.strip().split()[0] if result.stdout.strip() else None
+        if ip:
+            return f'http://{ip}:8080'
+    except Exception:
+        pass
+
+    return None
+
+
 # --- Tuning knobs ---
 JS_WORKERS              = 8             # parallel script fetches
 JS_FETCH_TIMEOUT        = (5, 6)        # (connect, read) seconds per script
@@ -400,6 +436,33 @@ def run_scan(target_url, verbose=True):
         all_findings.extend(direct_jf)
         if verbose:
             print(f"      {len(direct_jf)} finding(s) from direct script analysis")
+
+    # --- Carapace renderer (optional) ---
+    # Discovers the running container automatically via docker inspect.
+    # Falls back silently if Carapace is not running or unreachable.
+    _carapace_url = _discover_carapace_url()
+    if _carapace_url:
+        if verbose:
+            print("\n[Renderer] Carapace visual analysis...")
+        try:
+            from scanner.modules.carapace_client import flags_to_findings as _c_flags
+            _cr = requests.post(
+                f'{_carapace_url}/render',
+                json={'url': final_url, 'format': 'png', 'width': 1280, 'no_assets': False},
+                headers={'Content-Type': 'application/json'},
+                timeout=30,
+            )
+            _cr.raise_for_status()
+            _cd = _cr.json()
+            _ct = _cd.get('threat_report', {})
+            _renderer_findings = _c_flags(_ct.get('flags', []), final_url)
+            all_findings.extend(_renderer_findings)
+            if verbose:
+                print(f"      risk={_ct.get('risk_score', 0)} | "
+                      f"{len(_renderer_findings)} renderer finding(s)")
+        except Exception as _ce:
+            if verbose:
+                print(f"      Carapace unavailable: {_ce}")
 
     # --- Deduplicate, collapse, sort ---
     all_findings = scorer.deduplicate_findings(all_findings)
