@@ -85,7 +85,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/')"]
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.create_connection(('localhost',8000),timeout=5); s.send(b'GET /api/health/ HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n'); r=s.recv(12); s.close(); sys.exit(0 if r.startswith(b'HTTP/1') else 1)\""]
       interval: 15s
       timeout: 10s
       retries: 5

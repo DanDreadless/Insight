@@ -80,7 +80,7 @@ if _db_url.startswith('sqlite:///'):
 elif _db_url.startswith('postgres'):
     # SEC-23: use urlparse instead of a hand-rolled regex so passwords
     # containing '@' (URL-encoded as %40) are handled correctly.
-    from urllib.parse import urlparse as _urlparse
+    from urllib.parse import urlparse as _urlparse, unquote as _unquote
     _parsed_db = _urlparse(_db_url)
     if not _parsed_db.hostname:
         raise ValueError(f'Cannot parse DATABASE_URL: {_db_url}')
@@ -89,7 +89,7 @@ elif _db_url.startswith('postgres'):
             'ENGINE': 'django.db.backends.postgresql',
             'NAME': _parsed_db.path.lstrip('/'),
             'USER': _parsed_db.username or '',
-            'PASSWORD': _parsed_db.password or '',
+            'PASSWORD': _unquote(_parsed_db.password or ''),
             'HOST': _parsed_db.hostname,
             'PORT': str(_parsed_db.port or 5432),
         }
@@ -181,6 +181,7 @@ SESSION_COOKIE_SAMESITE = 'Strict'
 
 # Production hardening — only active when DEBUG=False to avoid breaking local dev
 if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
