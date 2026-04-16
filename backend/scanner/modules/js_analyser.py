@@ -1482,6 +1482,13 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
     if injected_src:
         evidence_parts.append(f'[Injected script URL]\n{injected_src}')
 
+    # If the injected script src resolves to a known-good domain, suppress —
+    # this is standard platform initialisation (e.g. Wix loading its own CDN
+    # scripts) rather than a malicious second-stage payload drop.
+    if injected_src and not injected_src.startswith('<variable'):
+        if is_known_good(injected_src):
+            return []
+
     return [{
         'severity': 'HIGH',
         'category': 'JavaScript',

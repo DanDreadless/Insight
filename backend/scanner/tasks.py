@@ -29,7 +29,7 @@ from scanner.modules import (
 from scanner.modules.robots_checker import check_robots
 from scanner.modules.whois_lookup import lookup_whois
 from scanner.modules.engine_version import get_engine_version
-from scanner.modules.known_good_domains import is_known_good
+from scanner.modules.known_good_domains import is_known_good, is_site_builder_cdn, PLATFORM_INLINE_SKIP_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -501,8 +501,8 @@ def run_scan(self, scan_job_id: str) -> dict:
                 'evidence': f'Submitted URL: {url}\nHost: {_submitted_host}',
                 'resource_url': url,
             })
-        _submitted_domain = _tldextract.extract(url).top_domain_under_public_suffix
-        _final_domain_r = _tldextract.extract(final_url).top_domain_under_public_suffix
+        _submitted_domain = _tldextract.extract(url).top_domain_under_public_suffix.lower()
+        _final_domain_r = _tldextract.extract(final_url).top_domain_under_public_suffix.lower()
         _skip_content_analysis = False
         _cross_domain = (
             # Normal domain-to-domain redirect
@@ -862,6 +862,29 @@ def run_scan(self, scan_job_id: str) -> dict:
         js_time_budget = soft_limit - 15
 
         scripts = [] if _skip_content_analysis else resources.get('scripts', [])
+
+        # Platform-page detection: if every external script is known-good AND at
+        # least one is from a site-builder CDN (e.g. Wix/parastorage.com), this
+        # page's inline scripts are platform initialisation blobs, not user content.
+        # Skip inline scripts above PLATFORM_INLINE_SKIP_BYTES to avoid analysing
+        # Thunderbolt/React/i18n blobs — small inline scripts (<4 KB) are kept.
+        _external_scripts_on_page = [s for s in scripts if not s.get('inline') and s.get('url')]
+        _unknown_externals = [s for s in _external_scripts_on_page if not is_known_good(s['url'])]
+        _is_platform_page = (
+            not _unknown_externals
+            and any(is_site_builder_cdn(s['url']) for s in _external_scripts_on_page if s.get('url'))
+        )
+        if _is_platform_page:
+            _before = len(scripts)
+            scripts = [
+                s for s in scripts
+                if not s.get('inline') or len(s.get('content', '')) <= PLATFORM_INLINE_SKIP_BYTES
+            ]
+            logger.info(
+                '[scan:%s] Platform page detected — skipped %d large inline blobs',
+                scan_job_id, _before - len(scripts),
+            )
+
         processed = 0
         scripts_skipped_budget = 0
         scripts_total = len(scripts)

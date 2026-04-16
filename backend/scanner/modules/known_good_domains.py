@@ -77,7 +77,25 @@ CDN_DOMAINS: frozenset[str] = frozenset({
     'fontawesome.com',        # Font Awesome icon library
     'typekit.com',            # Adobe Fonts (formerly Typekit)
     'typekit.net',            # Adobe Fonts CDN
+    'parastorage.com',        # Wix platform CDN — versioned React, core-js, Thunderbolt engine
+    'sentry-cdn.com',         # Sentry browser error tracking SDK
 })
+
+# Site-builder platform CDNs.
+# Pages served by these platforms embed large minified inline scripts that are
+# platform initialisation code (Thunderbolt renderer, i18n data, React boot),
+# not user-authored content.  When ALL external scripts on a page come from
+# known-good domains and at least one is from a site-builder CDN, inline
+# scripts above PLATFORM_INLINE_SKIP_BYTES are skipped — they are provably
+# platform blobs, not attacker-injected payloads.
+SITE_BUILDER_CDNS: frozenset[str] = frozenset({
+    'parastorage.com',        # Wix — Thunderbolt platform
+})
+
+# Inline scripts larger than this on a detected platform page are skipped.
+# Chosen to be well above typical injected payload sizes (<2 KB) but below
+# even the smallest Wix platform blobs (typically 10 KB+).
+PLATFORM_INLINE_SKIP_BYTES: int = 4096
 
 # Payment processors — cross-domain form submissions to these are expected.
 PAYMENT_DOMAINS: frozenset[str] = frozenset({
@@ -273,3 +291,8 @@ def is_cdn(url_or_host: str) -> bool:
 def is_payment_processor(url_or_host: str) -> bool:
     """Return True if the domain is a known payment processor."""
     return _registrable(url_or_host) in PAYMENT_DOMAINS
+
+
+def is_site_builder_cdn(url_or_host: str) -> bool:
+    """Return True if the domain is a known site-builder platform CDN (e.g. Wix)."""
+    return _registrable(url_or_host) in SITE_BUILDER_CDNS

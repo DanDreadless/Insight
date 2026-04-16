@@ -186,7 +186,7 @@ def analyse_ssl(hostname: str, port: int = 443) -> list[dict]:
                 })
             elif days_remaining < 30:
                 findings.append({
-                    'severity': 'MEDIUM',
+                    'severity': 'LOW',
                     'category': 'SSL',
                     'title': f'SSL certificate expires soon ({days_remaining} days)',
                     'description': (

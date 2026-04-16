@@ -429,7 +429,7 @@ def analyse_domain(url: str, whois_data: dict | None = None) -> list[dict]:
     # ------------------------------------------------------------------
     # 7. Number substitution (l33t speak)
     # ------------------------------------------------------------------
-    leet_pattern = re.compile(r'(?:g00gle|paypa[l1]|micr0s0ft|f[a4]cebook|[a4]pp[l1]e|tw[i1]tter)', re.IGNORECASE)
+    leet_pattern = re.compile(r'(?:g00gle|paypa1|micr0s0ft|f4cebook|4pple|app1e|tw1tter)', re.IGNORECASE)
     leet_match = leet_pattern.search(sld)
     if leet_match:
         findings.append({

@@ -48,7 +48,7 @@ from scanner.modules import (
     scorer,
 )
 from scanner.modules.resource_collector import collect_resources
-from scanner.modules.known_good_domains import is_known_good
+from scanner.modules.known_good_domains import is_known_good, is_site_builder_cdn, PLATFORM_INLINE_SKIP_BYTES
 
 TARGET_URL = 'https://www.cloudretouch.com'
 
@@ -215,8 +215,8 @@ def run_scan(target_url, verbose=True):
             'evidence': f'Submitted URL: {target_url}\nHost: {_orig_host}',
             'resource_url': target_url,
         })
-    _orig_domain = _tle.extract(target_url).top_domain_under_public_suffix
-    _final_domain = _tle.extract(final_url).top_domain_under_public_suffix
+    _orig_domain = _tle.extract(target_url).top_domain_under_public_suffix.lower()
+    _final_domain = _tle.extract(final_url).top_domain_under_public_suffix.lower()
     _skip_content_analysis = False
     _cross_domain = (
         (_orig_domain and _final_domain and _orig_domain != _final_domain)
@@ -307,9 +307,30 @@ def run_scan(target_url, verbose=True):
     external_scripts = [s for s in external_scripts if not is_known_good(s['url'])]
     external_scripts = external_scripts[:JS_MAX_SCRIPTS]
 
+    # Platform-page detection: if every external script was skipped as known-good
+    # AND at least one came from a site-builder CDN, this is a platform-hosted page
+    # (e.g. Wix). Inline scripts on these pages are platform initialisation blobs
+    # (Thunderbolt renderer, i18n data, React boot) — not user-authored content.
+    # Skip inline scripts above PLATFORM_INLINE_SKIP_BYTES; small ones (<4 KB)
+    # are still checked since they could be user-injected code.
+    _is_platform_page = (
+        len(external_scripts) == 0
+        and any(is_site_builder_cdn(s['url']) for s in skipped)
+    )
+    platform_inline_skipped = 0
+    if _is_platform_page:
+        filtered = []
+        for s in inline_scripts:
+            if len(s.get('content', '')) > PLATFORM_INLINE_SKIP_BYTES:
+                platform_inline_skipped += 1
+            else:
+                filtered.append(s)
+        inline_scripts = filtered
+
     if verbose:
         print(f"      {len(inline_scripts)} inline | {len(external_scripts)} external to fetch "
-              f"| {len(skipped)} known-good skipped")
+              f"| {len(skipped)} known-good skipped"
+              + (f" | {platform_inline_skipped} platform blobs skipped" if platform_inline_skipped else ""))
 
     js_findings = []
     js_count = 0
@@ -405,23 +426,24 @@ def run_single(target_url):
     print(f"Scan complete. {len(all_findings)} total finding(s). Verdict: {verdict}")
 
 
-def run_feedback_mode(target_id=None):
+def run_feedback_mode(target_id=None, cases_path=None):
     """
     Run the scanner against all feedback cases that have expected_verdict set.
     Compares actual result to expected and reports PASS/FAIL.
     """
-    if not os.path.exists(CASES_PATH):
-        print(f"{RED}No cases.json found at {CASES_PATH}{RESET}")
+    cases_path = cases_path or CASES_PATH
+    if not os.path.exists(cases_path):
+        print(f"{RED}No cases.json found at {cases_path}{RESET}")
         print("Run: python manage.py export_feedback")
         sys.exit(1)
 
-    with open(CASES_PATH, encoding='utf-8') as f:
+    with open(cases_path, encoding='utf-8') as f:
         cases = json.load(f)
 
     if target_id is not None:
         cases = [c for c in cases if c['id'] == target_id]
         if not cases:
-            print(f"{RED}No case with id={target_id} found in {CASES_PATH}{RESET}")
+            print(f"{RED}No case with id={target_id} found in {cases_path}{RESET}")
             sys.exit(1)
 
     # Only test cases with expected_verdict set — others need developer annotation
@@ -436,7 +458,7 @@ def run_feedback_mode(target_id=None):
         for c in pending_review:
             note = f' — "{c["note"]}"' if c.get('note') else ''
             print(f"  ID {c['id']:>4}  [{c['reason']:<16}]  {c['actual_verdict']:<10}  {c['url']}{note}")
-        print(f"\nEdit {CASES_PATH} to set expected_verdict for each case before testing.")
+        print(f"\nEdit {cases_path} to set expected_verdict for each case before testing.")
     print(f"{'─'*70}\n")
 
     if not testable:
@@ -499,10 +521,12 @@ def main():
     parser.add_argument('url', nargs='?', help='URL to scan (single mode)')
     parser.add_argument('--feedback', action='store_true', help='Run against feedback/cases.json')
     parser.add_argument('--id', type=int, dest='case_id', help='Test a single feedback case by ID')
+    parser.add_argument('--cases-file', dest='cases_file', default=None,
+                        help='Path to cases.json (default: feedback/cases.json)')
     args = parser.parse_args()
 
     if args.feedback or args.case_id is not None:
-        run_feedback_mode(target_id=args.case_id)
+        run_feedback_mode(target_id=args.case_id, cases_path=args.cases_file)
     else:
         target_url = args.url or TARGET_URL
         run_single(target_url)
