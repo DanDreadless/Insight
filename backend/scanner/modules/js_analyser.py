@@ -201,6 +201,12 @@ def _check_eval_obfuscation(js: str) -> list[dict]:
     for pattern, desc in patterns:
         m = re.search(pattern, js, re.IGNORECASE)
         if m:
+            # Exclude jQuery/framework globalEval: new Function("return " + expr)()
+            # This legitimate pattern appears in minified jQuery and similar libraries.
+            if 'Function' in pattern and re.search(
+                r'new\s+Function\s*\(\s*["\']return\s', js[max(0, m.start()-5):m.end()+5], re.IGNORECASE
+            ):
+                continue
             evidence = _snippet(js, m)
             # If the pattern involves atob(), try to extract and decode the
             # base64 argument so the analyst can read the decoded payload.
@@ -297,7 +303,7 @@ def _check_fromcharcode(js: str) -> list[dict]:
     return findings
 
 
-def _check_hex_string_obfuscation(js: str) -> list[dict]:
+def _check_hex_string_obfuscation(js: str, source_url: str = '') -> list[dict]:
     """
     Detect systematic \\x hex-escape obfuscation in JavaScript.
 
@@ -310,6 +316,13 @@ def _check_hex_string_obfuscation(js: str) -> list[dict]:
     decoded script (every \\xNN replaced with its character) so an analyst
     can read both and make their own judgement.
     """
+    # Akamai Bot Manager scripts are served from the merchant's domain under the
+    # well-known /akam/ path.  They are intentionally heavily hex-obfuscated by
+    # Akamai to protect their bot-detection logic.  This is vendor obfuscation,
+    # not malicious obfuscation.
+    if source_url and re.search(r'/akam/', source_url, re.IGNORECASE):
+        return []
+
     hex_seq = re.compile(r'\\x[0-9a-fA-F]{2}')
     total_sequences = len(hex_seq.findall(js))
 
@@ -440,7 +453,9 @@ def _check_high_entropy_strings(js: str, source_url: str = '') -> list[dict]:
         # Skip the standard base64 alphabet itself — it appears verbatim in
         # many libraries (crypto polyfills, encoding utilities) and has
         # maximum entropy by construction, but is not an encoded payload.
-        if re.match(r'^[A-Za-z0-9+/]{64}$', literal) and len(set(literal)) == 64:
+        # Matches both the 64-char form (no padding) and the 65-char form
+        # with trailing '=' that Akamai and similar libraries include.
+        if re.match(r'^[A-Za-z0-9+/=]{64,65}$', literal) and len(set(literal)) >= 64:
             continue
 
         # Skip human-readable strings (credits, comments, changelogs).
@@ -759,14 +774,17 @@ def _check_payment_skimmer(js: str) -> list[dict]:
     if not dom_match or not exfil_match:
         return findings
 
-    # If the exfiltration target URL is a known payment processor this is
-    # almost certainly a legitimate SDK call (e.g. Stripe Elements posting to
-    # api.stripe.com), not a skimmer.
-    url_match = exfil_url_re.search(js)
-    if url_match:
-        from scanner.modules.known_good_domains import is_payment_processor, is_analytics
-        exfil_url = url_match.group(1)
-        if is_payment_processor(exfil_url) or is_analytics(exfil_url):
+    # If every extractable exfiltration URL is relative (same-origin) or a known
+    # payment processor/analytics endpoint, this is not a skimmer.  Real Magecart
+    # skimmers always exfiltrate to an attacker-controlled external domain — they
+    # never send card data back to the merchant's own API.
+    from scanner.modules.known_good_domains import is_payment_processor, is_analytics
+    all_exfil_urls = exfil_url_re.findall(js)
+    if all_exfil_urls:
+        external_exfil = [u for u in all_exfil_urls if '://' in u]
+        if not external_exfil:
+            return findings  # all fetch/beacon targets are relative (same-origin)
+        if all(is_payment_processor(u) or is_analytics(u) for u in external_exfil):
             return findings
 
     # Score corroborating signals — each raises confidence.
@@ -885,6 +903,13 @@ def _check_hidden_iframe_injection(js: str, source_url: str = '') -> list[dict]:
     # buygoods.com/affiliates/go/conversion is standard affiliate tracking,
     # not clickjacking or drive-by malware.
     if 'buygoods.com/affiliates/go/conversion' in js:
+        return findings
+    # OneTrust Cookie Compliance SDK creates hidden iframes for cross-domain
+    # consent synchronisation.  The otSDKStub / OptanonWrapper signatures are
+    # unique to OneTrust's consent management platform.
+    if source_url and 'otSDKStub' in source_url:
+        return findings
+    if 'OptanonWrapper' in js or 'OneTrust.initializeCookiePolicyHtml' in js:
         return findings
     iframe_m = re.search(
         r'createElement\s*\(\s*["\']iframe["\']',
@@ -2060,7 +2085,6 @@ def _check_tds_fingerprint_redirect(js: str) -> list[dict]:
     """
     findings: list[dict] = []
 
-    has_fingerprint = bool(re.search(r'navigator\s*\.\s*(?:userAgent|language|platform)', js, re.IGNORECASE))
     has_fetch = bool(re.search(r'\bfetch\s*\(', js))
     has_then = bool(re.search(r'\.then\s*\(', js))
     has_json = bool(re.search(r'\bJSON\s*[\.\[]', js))
@@ -2069,8 +2093,16 @@ def _check_tds_fingerprint_redirect(js: str) -> list[dict]:
         r'window(?:\.location|\s*\[[^\]]+\])(?:\.href|\.replace|\s*\[[^\]]+\])?\s*=(?!=)',
         js, re.IGNORECASE,
     ))
+    # Require navigator fingerprint data to appear WITHIN the fetch() call body,
+    # not just anywhere in the file.  A large bundle may independently contain
+    # navigator.userAgent (for responsive design) and an unrelated fetch() call;
+    # a real TDS script must collect the fingerprint and POST it together.
+    has_fingerprint_in_fetch = bool(re.search(
+        r'\bfetch\s*\([^;]{0,600}navigator\s*\.\s*(?:userAgent|language|platform)',
+        js, re.IGNORECASE | re.DOTALL,
+    ))
 
-    if has_fingerprint and has_fetch and has_then and has_json and has_window_assign:
+    if has_fingerprint_in_fetch and has_fetch and has_then and has_json and has_window_assign:
         fetch_m = re.search(r'\bfetch\s*\([^;]{0,300}', js, re.DOTALL)
         evidence = fetch_m.group(0)[:400].strip() if fetch_m else '(fetch call obfuscated)'
         findings.append({
@@ -2187,7 +2219,7 @@ def analyse_js(js_content: str, source_url: str = '', beautify: bool = True) -> 
         add_findings(_check_eval_obfuscation(js))
         add_findings(_check_array_rotation_obfuscation(js))
         add_findings(_check_fromcharcode(js))
-        add_findings(_check_hex_string_obfuscation(js))
+        add_findings(_check_hex_string_obfuscation(js, source_url))
         add_findings(_check_high_entropy_strings(js, source_url))
         add_findings(_check_split_join_evasion(js))
         add_findings(_check_cookie_exfiltration(js))
