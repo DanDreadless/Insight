@@ -420,8 +420,9 @@ def _check_high_entropy_strings(js: str, source_url: str = '') -> list[dict]:
         seen.add(literal)
 
         # Skip URL strings — query parameters and hex tracking tokens raise
-        # entropy naturally, but URLs are never encoded payloads.
-        if re.match(r'https?://', literal, re.IGNORECASE):
+        # entropy naturally, but URLs are never encoded payloads.  Also handle
+        # backslash-escaped slashes (https:\/\/) as they appear in raw JS strings.
+        if re.match(r'https?:(?://|\\/\\/)', literal, re.IGNORECASE):
             continue
 
         # Skip CSS-like strings — property:value pairs produce naturally high
@@ -1468,6 +1469,14 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
     # addScript() helper that uses the createElement/src/appendChild triad.
     # This is A/B testing infrastructure, not script injection.
     if '_vwo_code' in js or 'visualwebsiteoptimizer.com' in js:
+        return []
+
+    # WordPress emoji detection loader — tests emoji rendering support via
+    # OffscreenCanvas/Canvas, then conditionally injects the emoji polyfill.
+    # Fingerprinted by the `everythingExceptFlag` supports-object key, which is
+    # unique to wp-emoji-release.min.js and does not appear in ad injectors or
+    # Magecart skimmers.
+    if 'everythingExceptFlag' in js:
         return []
 
     # Match createElement('script') in both dot-notation and bracket-notation:
