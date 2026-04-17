@@ -9,6 +9,7 @@ import FindingCard from '../components/results/FindingCard'
 import ResourceList from '../components/results/ResourceList'
 import TechStack from '../components/results/TechStack'
 import DomainInfo from '../components/results/DomainInfo'
+import NetworkTrace from '../components/results/NetworkTrace'
 import SourceViewer from '../components/results/SourceViewer'
 import ScreenshotViewer from '../components/results/ScreenshotViewer'
 import LoadingSpinner from '../components/LoadingSpinner'
@@ -507,6 +508,11 @@ export default function ScanPage() {
         <TechStack technologies={(scan.scan_metadata?.detected_technologies as never) ?? []} />
         <ResourceList metadata={scan.scan_metadata ?? {}} />
       </div>
+
+      {/* Network trace — domains/IPs for all hops in the redirect chain */}
+      {scan.scan_metadata?.network_trace && (
+        <NetworkTrace trace={scan.scan_metadata.network_trace as { url: string; host: string; ip: string }[]} />
+      )}
 
       {/* Source viewer */}
       <SourceViewer

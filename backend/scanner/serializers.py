@@ -1,4 +1,4 @@
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from rest_framework import serializers
 
@@ -68,6 +68,12 @@ class ScanSubmitSerializer(serializers.Serializer):
 
     def validate_url(self, value: str) -> str:
         value = value.strip()
+
+        # Decode percent-encoded scheme (e.g. http%3A%2F%2Fexample.com → http://example.com).
+        # Users sometimes paste URLs copied from encoded contexts (email clients, docs, etc.).
+        lower = value.lower()
+        if lower.startswith('http%3a') or lower.startswith('https%3a'):
+            value = unquote(value)
 
         if len(value) > 2048:
             raise serializers.ValidationError('URL must not exceed 2048 characters.')

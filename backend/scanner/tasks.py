@@ -15,7 +15,7 @@ from django.utils import timezone as django_timezone
 
 from scanner.models import Finding, ScanJob
 from scanner.validators import validate_url
-from scanner.modules.fetcher import fetch, FetchError, HttpStatusError
+from scanner.modules.fetcher import fetch, FetchError, HttpStatusError, SslVerificationError
 from scanner.modules.resource_collector import collect_resources
 from scanner.modules import (
     header_analyser,
@@ -37,6 +37,46 @@ logger = logging.getLogger(__name__)
 def _get_client_ip_from_url(url: str) -> str:
     """Extract hostname from URL for SSL analysis."""
     return urlparse(url).hostname or ''
+
+
+def _resolve_ip(hostname: str) -> str:
+    """Resolve hostname to its first IP address, or return empty string on failure."""
+    import socket
+    if not hostname:
+        return ''
+    try:
+        addr_infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        for info in addr_infos:
+            ip = info[4][0]
+            if ip:
+                return ip
+    except Exception:
+        pass
+    return ''
+
+
+def _build_network_trace(submitted_url: str, redirect_chain: list, final_url: str) -> list:
+    """
+    Build ordered list of all network hops with resolved IPs.
+    submitted_url → [redirect_chain hops] → final_url.
+    Deduplicates adjacent identical URLs (e.g. scheme-normalisation by the validator).
+    """
+    all_urls = [submitted_url] + list(redirect_chain) + [final_url]
+    # Deduplicate adjacent identical URLs while preserving order
+    deduped = []
+    for url in all_urls:
+        if not deduped or url != deduped[-1]:
+            deduped.append(url)
+
+    trace = []
+    for url in deduped:
+        hostname = urlparse(url).hostname or ''
+        # For bare IP hosts the IP is the hostname itself
+        is_bare_ip = bool(re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', hostname))
+        ip = hostname if is_bare_ip else _resolve_ip(hostname)
+        trace.append({'url': url, 'host': hostname, 'ip': ip})
+
+    return trace
 
 
 # Script file extensions and Content-Types that indicate a directly-served
@@ -258,6 +298,46 @@ def run_scan(self, scan_job_id: str) -> dict:
         html_content = response['text']
         response_headers = response['headers']
         status_code = response['status_code']
+
+        # ----------------------------------------------------------------
+        # SSL cert bypass finding + analyser run on the failing hop
+        # If the fetcher fell back to verify_ssl=False, surface a finding and
+        # run ssl_analyser on the hostname that had the cert issue — it may
+        # differ from final_url (e.g. a shortlink that has an expired cert
+        # but redirects to a different host with a valid cert).
+        # ----------------------------------------------------------------
+        if response.get('ssl_cert_error'):
+            _ssl_failing_url = response.get('ssl_cert_error_url', url)
+            _ssl_failing_host = urlparse(_ssl_failing_url).hostname or ''
+            _final_host = urlparse(final_url).hostname or ''
+
+            all_findings.append({
+                'severity': 'MEDIUM',
+                'category': 'SSL',
+                'title': 'SSL certificate verification failed — scanner bypassed verification',
+                'description': (
+                    f'The SSL certificate for {_ssl_failing_host!r} could not be verified '
+                    '(the certificate is likely expired, self-signed, or has a hostname mismatch). '
+                    'Browsers show a security warning for this site. '
+                    'The scan continued with certificate verification bypassed so content '
+                    'analysis could proceed. See SSL findings below for certificate details.'
+                ),
+                'evidence': f'Failing URL: {_ssl_failing_url}',
+                'resource_url': _ssl_failing_url,
+            })
+
+            # Run ssl_analyser on the failing host if it is not the final host
+            # (the main ssl_analyser pass below only covers final_url).
+            if _ssl_failing_host and _ssl_failing_host != _final_host:
+                logger.info('[scan:%s] Running SSL analysis on failing hop: %s', scan_job_id, _ssl_failing_host)
+                try:
+                    _ssl_port = urlparse(_ssl_failing_url).port or 443
+                    _hop_ssl_findings = ssl_analyser.analyse_ssl(_ssl_failing_host, _ssl_port)
+                    for f in _hop_ssl_findings:
+                        f.setdefault('resource_url', _ssl_failing_url)
+                    all_findings.extend(_hop_ssl_findings)
+                except Exception as exc:
+                    logger.warning('[scan:%s] SSL analysis error for failing hop %s: %s', scan_job_id, _ssl_failing_host, exc)
 
         # ----------------------------------------------------------------
         # Step 3: Check for non-scannable HTTP status codes
@@ -590,9 +670,11 @@ def run_scan(self, scan_job_id: str) -> dict:
             job.status = ScanJob.Status.COMPLETE
             job.verdict = verdict
             job.completed_at = django_timezone.now()
+            _dl_redirect_chain = response.get('redirect_chain', [])
             job.scan_metadata = {
                 'final_url': final_url,
-                'redirect_chain': response.get('redirect_chain', []),
+                'redirect_chain': _dl_redirect_chain,
+                'network_trace': _build_network_trace(job.url, _dl_redirect_chain, final_url),
                 'status_code': status_code,
                 'is_download': True,
                 'download_filename': filename,
@@ -868,9 +950,11 @@ def run_scan(self, scan_job_id: str) -> dict:
             }
             for f in resources.get('forms', [])
         ]
+        _redirect_chain = response.get('redirect_chain', [])
         scan_metadata = {
             'final_url': final_url,
-            'redirect_chain': response.get('redirect_chain', []),
+            'redirect_chain': _redirect_chain,
+            'network_trace': _build_network_trace(job.url, _redirect_chain, final_url),
             'status_code': status_code,
             'engine_version': current_engine_version,
             'scripts_count': len(resources.get('scripts', [])),

@@ -37,7 +37,17 @@ export default function HomePage() {
   const navigate = useNavigate()
 
   function normaliseUrl(input: string): string {
-    const trimmed = input.trim()
+    let trimmed = input.trim()
+    // Decode percent-encoded scheme (e.g. http%3A%2F%2Fexample.com → http://example.com).
+    // Users sometimes paste URLs copied from encoded contexts (email clients, issue trackers, etc.).
+    try {
+      const lower = trimmed.toLowerCase()
+      if (lower.startsWith('http%3a') || lower.startsWith('https%3a')) {
+        trimmed = decodeURIComponent(trimmed)
+      }
+    } catch {
+      // malformed encoding — leave as-is and let validation handle it
+    }
     // If no scheme is present, default to https://.
     // Most modern sites are HTTPS-only; plain HTTP often drops the connection
     // at the TCP level rather than redirecting.  Users who explicitly need HTTP

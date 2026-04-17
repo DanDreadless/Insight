@@ -9,6 +9,12 @@ Binary/download responses (Content-Disposition: attachment or non-text
 Content-Type) are never stored in memory beyond a single chunk at a time —
 they are stream-hashed (SHA-256) and discarded, so nothing ever touches disk
 and RAM usage stays constant regardless of file size.
+
+SSL handling: the public fetch() attempts the request with SSL verification
+enabled.  If the server's certificate cannot be verified (expired, self-signed,
+hostname mismatch), it retries without verification and sets ssl_cert_error=True
+in the response so the caller can surface a finding.  Certificate issues are
+reported independently by ssl_analyser.py via a direct TLS handshake.
 """
 import hashlib
 import logging
@@ -16,11 +22,17 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
-from requests.structures import CaseInsensitiveDict
 
 from scanner.validators import validate_url
 from django.core.exceptions import ValidationError
+
+# Suppress the urllib3 InsecureRequestWarning that fires when verify=False is
+# used during the SSL-fallback retry path.  The warning is noise here because
+# the scanner intentionally retries without verification after a cert failure,
+# and ssl_analyser.py reports the certificate issue as a finding independently.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +45,7 @@ _USER_AGENT = (
 )
 _DEFAULT_TIMEOUT = (5, 10)
 _MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
-_MAX_REDIRECTS = 3
+_MAX_REDIRECTS = 10
 
 # Content-Type prefixes/values that indicate binary/download content.
 # These responses are stream-hashed only — no body is stored in memory.
@@ -104,6 +116,19 @@ class HttpStatusError(FetchError):
         self.status_code = status_code
 
 
+class SslVerificationError(FetchError):
+    """
+    Raised when SSL certificate verification fails on a hop.
+
+    failing_url is the specific URL (hop) whose certificate could not be
+    verified — used by fetch() to record which host had the cert issue and
+    to run ssl_analyser on that hostname even if it is not the final URL.
+    """
+    def __init__(self, message: str, failing_url: str = '', user_message: str | None = None):
+        super().__init__(message, user_message=user_message)
+        self.failing_url = failing_url
+
+
 def fetch(
     url: str,
     timeout: tuple[int, int] = _DEFAULT_TIMEOUT,
@@ -113,13 +138,47 @@ def fetch(
     """
     Fetch a URL safely.
 
+    Attempts with SSL verification enabled first.  If the server's certificate
+    cannot be verified, retries without verification and sets ssl_cert_error=True
+    and ssl_cert_error_url in the response dict so tasks.py can surface a finding
+    and run ssl_analyser on the failing hostname.
+
     Returns a dict with:
-        url           – final URL after redirects
-        status_code   – HTTP status code
-        headers       – response headers (dict)
-        content       – raw bytes (capped at max_size_bytes)
-        text          – decoded string
-        redirect_chain – list of intermediate URLs followed
+        url                – final URL after redirects
+        status_code        – HTTP status code
+        headers            – response headers (dict)
+        content            – raw bytes (capped at max_size_bytes)
+        text               – decoded string
+        redirect_chain     – list of intermediate URLs followed
+        ssl_cert_error     – True if SSL verification was bypassed (optional key)
+        ssl_cert_error_url – URL of the hop that failed cert verification (optional key)
+    """
+    _ssl_failing_url: str = ''
+    try:
+        return _fetch_core(url, timeout=timeout, max_size_bytes=max_size_bytes,
+                           max_redirects=max_redirects, verify_ssl=True)
+    except SslVerificationError as ssl_exc:
+        # Capture before Python deletes the 'as' variable at end of except block.
+        _ssl_failing_url = ssl_exc.failing_url or url
+        logger.info('SSL cert verification failed for %s — retrying without verification', _ssl_failing_url)
+
+    result = _fetch_core(url, timeout=timeout, max_size_bytes=max_size_bytes,
+                         max_redirects=max_redirects, verify_ssl=False)
+    result['ssl_cert_error'] = True
+    result['ssl_cert_error_url'] = _ssl_failing_url
+    return result
+
+
+def _fetch_core(
+    url: str,
+    timeout: tuple[int, int] = _DEFAULT_TIMEOUT,
+    max_size_bytes: int = _MAX_SIZE_BYTES,
+    max_redirects: int = _MAX_REDIRECTS,
+    verify_ssl: bool = True,
+) -> dict:
+    """
+    Core fetch implementation.  Called by fetch() — do not call directly.
+    verify_ssl=False is only used on the SSL-fallback retry path.
     """
     # Validate the initial URL before opening any connection
     try:
@@ -179,11 +238,21 @@ def fetch(
                     timeout=timeout,
                     allow_redirects=False,
                     stream=True,
+                    verify=verify_ssl,
                 )
             except requests.exceptions.Timeout as exc:
                 raise FetchError(
                     f'Request timed out for {current_url}',
                     user_message='Connection timed out — the server did not respond in time.',
+                ) from exc
+            except requests.exceptions.SSLError as exc:
+                # Raised specifically for cert verification failures (expired,
+                # self-signed, hostname mismatch).  Re-raise as SslVerificationError
+                # so fetch() can retry with verify_ssl=False and record the failing URL.
+                raise SslVerificationError(
+                    f'SSL certificate verification failed for {current_url}: {exc}',
+                    failing_url=current_url,
+                    user_message='SSL/TLS error — the server\'s certificate could not be verified.',
                 ) from exc
             except requests.exceptions.ConnectionError as exc:
                 exc_str = str(exc).lower()

@@ -14,8 +14,12 @@ import json
 import os
 import sys
 import time
+import warnings
 import requests
+import urllib3
 from urllib.parse import urlparse
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Force line-buffered stdout so output appears immediately in background runs
@@ -125,7 +129,7 @@ BOLD  = '\033[1m'
 
 def fetch_page(url, max_bytes=5 * 1024 * 1024):
     r = requests.get(url, headers=HEADERS, timeout=(5, 15),
-                     verify=True, allow_redirects=True, stream=True)
+                     verify=False, allow_redirects=True, stream=True)
     content = b''
     for chunk in r.iter_content(8192):
         content += chunk
@@ -151,7 +155,7 @@ def fetch_and_analyse_script(url):
     """
     deadline = time.monotonic() + JS_DOWNLOAD_HARD_TIMEOUT
     r = requests.get(url, headers=HEADERS, timeout=JS_FETCH_TIMEOUT,
-                     verify=True, allow_redirects=True, stream=True)
+                     verify=False, allow_redirects=True, stream=True)
     content = b''
     for chunk in r.iter_content(8192):
         content += chunk
