@@ -44,6 +44,11 @@ _USER_AGENT = (
     'Chrome/133.0.0.0 Safari/537.36'
 )
 _DEFAULT_TIMEOUT = (5, 10)
+# Some CDN-backed sites (e.g. sites that throttle HTTP/1.1 clients while
+# preferring HTTP/2) can take 10–15 s before sending the first response byte.
+# Use this longer timeout for the initial page fetch; keep _DEFAULT_TIMEOUT
+# for external script fetches where a 30 s stall per script is unacceptable.
+PAGE_FETCH_TIMEOUT = (10, 30)
 _MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 _MAX_REDIRECTS = 10
 

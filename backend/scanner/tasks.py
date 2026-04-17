@@ -15,7 +15,7 @@ from django.utils import timezone as django_timezone
 
 from scanner.models import Finding, ScanJob
 from scanner.validators import validate_url
-from scanner.modules.fetcher import fetch, FetchError, HttpStatusError, SslVerificationError
+from scanner.modules.fetcher import fetch, FetchError, HttpStatusError, SslVerificationError, PAGE_FETCH_TIMEOUT
 from scanner.modules.resource_collector import collect_resources
 from scanner.modules import (
     header_analyser,
@@ -275,7 +275,7 @@ def run_scan(self, scan_job_id: str) -> dict:
         logger.info('[scan:%s] Fetching %s', scan_job_id, url)
         scheme_fallback_from = None
         try:
-            response = fetch(url)
+            response = fetch(url, timeout=PAGE_FETCH_TIMEOUT)
         except FetchError as original_exc:
             original_scheme = urlparse(url).scheme
             if original_scheme == 'https':
@@ -288,7 +288,7 @@ def run_scan(self, scan_job_id: str) -> dict:
                 scan_job_id, original_exc, fallback_url,
             )
             try:
-                response = fetch(fallback_url)
+                response = fetch(fallback_url, timeout=PAGE_FETCH_TIMEOUT)
                 scheme_fallback_from = original_scheme
                 url = fallback_url
             except FetchError:
