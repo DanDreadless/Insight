@@ -510,7 +510,7 @@ export default function ScanPage() {
       </div>
 
       {/* Network trace — domains/IPs for all hops in the redirect chain */}
-      {scan.scan_metadata?.network_trace && (
+      {Array.isArray(scan.scan_metadata?.network_trace) && (
         <NetworkTrace trace={scan.scan_metadata.network_trace as { url: string; host: string; ip: string }[]} />
       )}
 
