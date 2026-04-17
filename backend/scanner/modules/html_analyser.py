@@ -318,6 +318,15 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
     # ------------------------------------------------------------------
     # 2. Hidden iframes
     # ------------------------------------------------------------------
+    # Known-safe hosts whose hidden iframes are always a noscript tag-manager
+    # pixel, never an attack primitive.  GTM in particular is universally
+    # deployed as a zero-dimension hidden noscript iframe and fires this check
+    # on virtually every site that uses Google Tag Manager.
+    _KNOWN_SAFE_IFRAME_HOSTS: frozenset[str] = frozenset({
+        'www.googletagmanager.com',
+        'googletagmanager.com',
+    })
+
     # Build the set of external script hostnames so we can suppress iframe
     # findings that come from the same CDN — a strong signal of TMS tracking
     # pixel infrastructure (e.g. Tealium) rather than an attack.
@@ -348,11 +357,14 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
         ])
 
         if is_hidden:
+            iframe_host = urlparse(url).hostname or ''
+            # Suppress known-safe tag-manager noscript pixel hosts.
+            if iframe_host in _KNOWN_SAFE_IFRAME_HOSTS:
+                continue
             # Suppress if iframe src is from the same host as an external
             # script already loaded on the page.  Tag management systems
             # (Tealium, similar) load their tracking pixels from the same
             # CDN distribution as their wrapper script — this is not an attack.
-            iframe_host = urlparse(url).hostname or ''
             if iframe_host and iframe_host in _ext_script_hosts:
                 continue
             # SEC-19: escape attacker-controlled values so a crafted attribute
