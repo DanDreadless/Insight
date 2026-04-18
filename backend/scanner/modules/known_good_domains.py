@@ -43,6 +43,7 @@ import tldextract
 # These domains have a narrow, well-defined purpose (analytics beacons,
 # tag firing) and are not meaningfully abused in the specific checks applied.
 ANALYTICS_DOMAINS: frozenset[str] = frozenset({
+    'google.com',             # Google reCAPTCHA (www.google.com/recaptcha), Fonts, etc.
     'googletagmanager.com',   # Google Tag Manager
     'google-analytics.com',   # Google Analytics (UA + GA4)
     'googletagservices.com',  # Google tag services
