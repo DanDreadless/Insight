@@ -66,9 +66,19 @@ CARAPACE_FLAG_INFO: dict[str, tuple[str, str]] = {
         'malicious payloads from static analysis tools.',
     ),
     'JS_FUNCTION_CONSTRUCTOR': (
-        'Renderer: Function constructor detected',
-        'new Function(code) was found during render-phase analysis. Like eval(), this '
-        'constructs and executes arbitrary code from a string at runtime.',
+        'Renderer: Function constructor with visible body',
+        'new Function("...") was found with a string-literal body — the actual code being '
+        'constructed is shown in the evidence block. Inspect the body for network calls, '
+        'document manipulation, or encoded payloads. Legitimate uses (template engines, '
+        'polyfills) typically have short, readable bodies.',
+    ),
+    'JS_FUNCTION_CONSTRUCTOR_DYNAMIC': (
+        'Renderer: Function constructor with dynamic body',
+        'new Function(expr) was called with a non-literal argument — the body is assembled '
+        'at runtime from a variable or expression that the static analyser cannot read. '
+        'This pattern is common in template engines and framework compilers (Vue, Angular) '
+        'and is not inherently malicious. It becomes high-confidence only when combined '
+        'with obfuscation signals such as base64 decoding or hex-escaped strings.',
     ),
     'BASE64_OBFUSCATION': (
         'Renderer: base64-encoded payload detected',
