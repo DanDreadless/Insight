@@ -1,17 +1,22 @@
 """
-Carapace integration — safe visual screenshot service.
+Carapace integration — safe visual screenshot and renderer-phase analysis.
 
 Calls the Carapace HTTP API (POST /render) to produce a pixel-perfect
-Chromium-headless screenshot of a URL with JavaScript fully disabled and
-network access blocked.  Returns the base64-encoded PNG and the Carapace
-threat report summary.
+Chromium-headless screenshot of a URL with network access isolated via a
+logging proxy.  JavaScript IS enabled in the renderer so that dynamic
+overlays (ClickFix, SocGholish, ClearFake, drainers) render and are
+detectable.  All outbound connections are blocked and logged — no data
+leaves the machine.
+
+Returns the base64-encoded PNG, the Carapace threat report, and a list of
+URLs that JavaScript attempted to fetch at runtime (intercepted by the proxy).
 
 Configuration (via environment variables):
     CARAPACE_URL               — base URL of the Carapace API server, e.g.
                                  http://carapace:8080.  If unset, all calls
                                  return None silently (screenshots disabled).
     CARAPACE_API_KEY           — optional API key sent in X-API-Key header.
-    CARAPACE_SCREENSHOT_TIMEOUT — per-request timeout in seconds (default 20).
+    CARAPACE_SCREENSHOT_TIMEOUT — per-request timeout in seconds (default 30).
 """
 import logging
 import os
@@ -22,18 +27,20 @@ logger = logging.getLogger(__name__)
 
 _CARAPACE_URL: str = os.getenv('CARAPACE_URL', '').rstrip('/')
 _CARAPACE_API_KEY: str = os.getenv('CARAPACE_API_KEY', '')
-_SCREENSHOT_TIMEOUT: int = int(os.getenv('CARAPACE_SCREENSHOT_TIMEOUT', '20'))
+_SCREENSHOT_TIMEOUT: int = int(os.getenv('CARAPACE_SCREENSHOT_TIMEOUT', '30'))
 
 # ---------------------------------------------------------------------------
 # Flag tables — shared by tasks.py and run_scan_test.py
 # ---------------------------------------------------------------------------
 
 CARAPACE_SKIP_CODES: frozenset[str] = frozenset({
-    'BLOCKED_ELEMENT_SCRIPT',   # Carapace always strips <script> tags
+    'BLOCKED_ELEMENT_SCRIPT',   # Carapace always strips <script> tags before static analysis
     'BLOCKED_ELEMENT_IFRAME',   # Always stripped
     'BLOCKED_ELEMENT_OTHER',    # Always stripped
-    'JAVASCRIPT_URL_STRIPPED',  # Very common; stripped as sanitisation
-    'NETWORK_ATTEMPT_BLOCKED',  # All network is blocked by design
+    'JAVASCRIPT_URL_STRIPPED',  # Very common; stripped as sanitisation artefact
+    'NETWORK_ATTEMPT_BLOCKED',  # Static-analysis detection of fetch/XHR in source code — too
+                                # noisy on legitimate sites.  Runtime interceptions are surfaced
+                                # via INTERCEPTED_REQUEST instead (higher confidence signal).
 })
 
 CARAPACE_SEVERITY_MAP: dict[str, str] = {
@@ -142,6 +149,39 @@ CARAPACE_FLAG_INFO: dict[str, tuple[str, str]] = {
         'real browsers show installed extensions. Checking plugins.length is a common '
         'technique for distinguishing analysis environments from real users.',
     ),
+    'SANDBOX_EVASION_CHROME_RUNTIME': (
+        'Sandbox evasion: chrome.runtime / window.chrome probe',
+        'A script accesses window.chrome or chrome.runtime — properties that are undefined in '
+        'headless Chromium despite the underlying engine being Chrome-based. No legitimate '
+        'website reads these properties; they appear exclusively in anti-bot fingerprinting '
+        'code designed to detect automated analysis environments and serve clean content to '
+        'scanners while serving malicious content to real users.',
+    ),
+    'SANDBOX_EVASION_FOCUS_PROBE': (
+        'Sandbox evasion: document focus probe',
+        'A script calls document.hasFocus(), which always returns false in headless browsers '
+        'because there is no user-visible window. This is used to detect automated analysis '
+        'environments. No legitimate site functionality depends on this check in a way that '
+        'would require it to be present in production page code.',
+    ),
+    'CSS_OVERLAY_INJECTED': (
+        'Fullscreen CSS overlay detected (ClickFix / SocGholish pattern)',
+        'A CSS rule with position:fixed, full viewport width (100%/100vw), and full viewport '
+        'height (100%/100vh) was found in the page. This structure creates a page-covering '
+        'layer that blocks all legitimate content behind it. ClickFix campaigns use this to '
+        'display a fake CAPTCHA or verification prompt that socially engineers the visitor into '
+        'pasting a malicious shell command. SocGholish and ClearFake use it for fake browser '
+        'update dialogs. Cookie banners and legitimate modals do not use full-height viewports.',
+    ),
+    'INTERCEPTED_REQUEST': (
+        'JavaScript runtime network request(s) intercepted',
+        'JavaScript on this page attempted to make one or more network requests at runtime '
+        'that were not present in the static HTML. All requests were blocked (the renderer '
+        'runs with full network isolation). The intercepted URLs are in the evidence block. '
+        'Dynamic script loading from an unknown domain is the payload-delivery step of '
+        'SocGholish and ClickFix campaigns. XHR/fetch calls to external domains indicate '
+        'data exfiltration or C2 communication attempts.',
+    ),
 }
 
 
@@ -168,19 +208,23 @@ def flags_to_findings(flags: list[dict], url: str) -> list[dict]:
     return findings
 
 
-def capture_screenshot(url: str, width: int = 1280) -> dict | None:
+def capture_screenshot(url: str, width: int = 1280, height: int = 1400) -> dict | None:
     """
     Render *url* using Carapace and return::
 
         {
-            'screenshot_b64': str,  # base64-encoded PNG; empty string on render failure
-            'carapace_risk':  int,  # Carapace risk score 0–100
-            'carapace_flags': list,
-            'carapace_tech':  list,
+            'screenshot_b64':        str,   # base64-encoded PNG; empty string on render failure
+            'carapace_risk':         int,   # Carapace risk score 0–100
+            'carapace_flags':        list,  # threat report flags
+            'carapace_tech':         list,  # technology stack detections
+            'carapace_intercepted':  list,  # URLs JS attempted to fetch at runtime
         }
 
     Returns ``None`` if CARAPACE_URL is not configured or the API is unreachable.
     Failures are logged at WARNING level and never propagate.
+
+    Height defaults to 1400px (taller than the previous 800px default) to
+    capture content injected below the fold — a common evasion technique.
     """
     if not _CARAPACE_URL:
         return None
@@ -197,6 +241,7 @@ def capture_screenshot(url: str, width: int = 1280) -> dict | None:
                 'url': url,
                 'format': 'png',
                 'width': width,
+                'height': height,
                 'no_assets': False,
             },
             timeout=_SCREENSHOT_TIMEOUT,
@@ -205,10 +250,11 @@ def capture_screenshot(url: str, width: int = 1280) -> dict | None:
         data = resp.json()
         threat = data.get('threat_report', {})
         return {
-            'screenshot_b64': data.get('output') or '',
-            'carapace_risk':  threat.get('risk_score', 0),
-            'carapace_flags': threat.get('flags', []),
-            'carapace_tech':  threat.get('tech_stack', []),
+            'screenshot_b64':       data.get('output') or '',
+            'carapace_risk':        threat.get('risk_score', 0),
+            'carapace_flags':       threat.get('flags', []),
+            'carapace_tech':        threat.get('tech_stack', []),
+            'carapace_intercepted': threat.get('blocked_network', []),
         }
     except _requests.exceptions.Timeout:
         logger.warning('Carapace screenshot timed out for %s', url)

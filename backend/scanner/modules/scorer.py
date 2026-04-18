@@ -302,7 +302,44 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
                 'evidence': 'Newly registered domain (<30 days) + high-risk TLD combination',
             })
 
-    # Context 8: TDS cloaking redirect + polymorphic obfuscation
+    # Context 8: Renderer-confirmed overlay + runtime network intercept
+    # CSS_OVERLAY_INJECTED fires when the Carapace browser renderer detects a fullscreen
+    # overlay — not inferred from source but confirmed at render time.  INTERCEPTED_REQUEST
+    # fires when JS attempted real network calls during that same render session.
+    # The combination is browser-grade evidence of an active ClickFix/SocGholish delivery
+    # chain: the overlay is live and the JS is calling out to a payload server.
+    has_css_overlay = _has_title_fragment('fullscreen css overlay')
+    has_intercepted_request = _has_title_fragment('runtime network request')
+    if has_css_overlay and has_intercepted_request:
+        if not any(f.get('title') == 'Context collapse: renderer-confirmed active overlay attack' for f in findings):
+            trigger_parts: list[str] = []
+            for f in findings:
+                title = f.get('title', '').lower()
+                if 'css overlay' in title or 'runtime network request' in title:
+                    label = f.get('title', '')
+                    ev = f.get('evidence', '').strip()
+                    trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
+            evidence_block = '\n\n'.join(trigger_parts) if trigger_parts else (
+                'Renderer-confirmed fullscreen overlay + runtime network request intercepted'
+            )
+            synthetic.append({
+                'severity': 'CRITICAL',
+                'category': 'Threat',
+                'title': 'Context collapse: renderer-confirmed active overlay attack',
+                'description': (
+                    'The Carapace browser renderer confirmed two signals in a single render session: '
+                    'a fullscreen CSS overlay (the structural signature of ClickFix and SocGholish) '
+                    'and JavaScript runtime network requests that were intercepted and blocked. '
+                    'This is browser-grade evidence of an active attack delivery chain — the overlay '
+                    'is live and the page script was actively calling out to an external payload '
+                    'or C2 server. Unlike static analysis, this detection cannot be a false positive '
+                    'from legitimate code: both signals were observed during real JavaScript execution '
+                    'in an isolated Chromium environment.'
+                ),
+                'evidence': evidence_block,
+            })
+
+    # Context 9: TDS cloaking redirect + polymorphic obfuscation
     # A Traffic Direction System that hides its API endpoint and redirect URLs
     # behind per-request XOR obfuscation is purpose-built attack infrastructure.
     # No legitimate website uses both patterns together.  The obfuscation exists

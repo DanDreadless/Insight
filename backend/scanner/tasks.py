@@ -509,8 +509,10 @@ def run_scan(self, scan_job_id: str) -> dict:
 
         # ----------------------------------------------------------------
         # Step 3c: Visual screenshot via Carapace (best-effort)
-        # Chromium-headless render with JS disabled — gives analysts a
-        # pixel-perfect view of what a real visitor would see.
+        # Chromium-headless render with JS ENABLED — gives analysts a
+        # pixel-perfect view of what a real visitor would see, including
+        # dynamic overlays (ClickFix, SocGholish, drainers).  Network is
+        # fully isolated via a logging proxy; no data leaves the machine.
         # Runs after the cache check so cache hits reuse the existing
         # screenshot stored in the canonical job's scan_metadata.
         # Failures are swallowed — the scan continues without a screenshot.
@@ -520,8 +522,11 @@ def run_scan(self, scan_job_id: str) -> dict:
         _carapace = capture_screenshot(final_url)
         if _carapace:
             logger.info(
-                '[scan:%s] Carapace screenshot: risk=%d, flags=%d',
-                scan_job_id, _carapace['carapace_risk'], len(_carapace.get('carapace_flags', [])),
+                '[scan:%s] Carapace screenshot: risk=%d, flags=%d, intercepted=%d',
+                scan_job_id,
+                _carapace['carapace_risk'],
+                len(_carapace.get('carapace_flags', [])),
+                len(_carapace.get('carapace_intercepted', [])),
             )
             # Skip Renderer threat findings for known-good platform hosts (X.com, LinkedIn, etc.)
             # Their legitimate JS bundles trigger false positives (new Function, cookie writes).
@@ -686,6 +691,7 @@ def run_scan(self, scan_job_id: str) -> dict:
                 'engine_version': current_engine_version,
                 'screenshot_b64': _carapace['screenshot_b64'] if _carapace else '',
                 'screenshot_carapace_risk': _carapace['carapace_risk'] if _carapace else 0,
+                'carapace_intercepted_urls': _carapace.get('carapace_intercepted', []) if _carapace else [],
             }
             job.error_message = ''
             job.detection_engine_version = current_engine_version
@@ -979,6 +985,7 @@ def run_scan(self, scan_job_id: str) -> dict:
             # Carapace visual render — empty string means screenshot unavailable.
             'screenshot_b64': _carapace['screenshot_b64'] if _carapace else '',
             'screenshot_carapace_risk': _carapace['carapace_risk'] if _carapace else 0,
+            'carapace_intercepted_urls': _carapace.get('carapace_intercepted', []) if _carapace else [],
         }
 
         now = django_timezone.now()
