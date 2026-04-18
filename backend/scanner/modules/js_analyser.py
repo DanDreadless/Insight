@@ -465,6 +465,14 @@ def _check_high_entropy_strings(js: str, source_url: str = '') -> list[dict]:
         if literal.count(' ') / len(literal) > 0.05:
             continue
 
+        # Skip strings that are predominantly non-ASCII Unicode — these are
+        # natural-language strings in non-Latin scripts (Thai, Chinese, Japanese,
+        # Korean, Arabic, Devanagari, etc.) which have artificially high entropy
+        # because of their multi-byte UTF-8 representation, but are never encoded
+        # payloads. Encoded payloads (base64, hex) are always pure ASCII.
+        if sum(1 for c in literal if ord(c) > 0x7F) / len(literal) > 0.3:
+            continue
+
         # Skip regex pattern strings — minified JS frequently stores compiled
         # regexes as string literals (e.g. for new RegExp(str)).  Regex
         # metachar sequences (\s, \d, \w, character classes [^...], anchors)
