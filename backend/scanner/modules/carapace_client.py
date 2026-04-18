@@ -164,6 +164,25 @@ CARAPACE_FLAG_INFO: dict[str, tuple[str, str]] = {
         'environments. No legitimate site functionality depends on this check in a way that '
         'would require it to be present in production page code.',
     ),
+    'CLIPBOARD_HIJACK': (
+        'Clipboard hijack: JavaScript wrote to the system clipboard',
+        'JavaScript on this page called navigator.clipboard.writeText() or registered a copy '
+        'event handler with clipboardData.setData(), overwriting the visitor\'s clipboard without '
+        'any user interaction. The intercepted payload is shown in the evidence block. This is the '
+        'delivery mechanism for clipboard-injection attacks: the victim is prompted to paste the '
+        'content into a terminal or Run dialog, executing an arbitrary command on their machine.',
+    ),
+    'CLIPBOARD_HIJACK_CLICKFIX': (
+        'ClickFix clipboard hijack: shell command written to clipboard (CRITICAL)',
+        'JavaScript on this page wrote a shell command directly to the visitor\'s clipboard via '
+        'navigator.clipboard.writeText() or a copy event handler. The intercepted command is shown '
+        'in the evidence block. This is the canonical ClickFix / paste-and-run attack: the page '
+        'displays a fake CAPTCHA, verification prompt, or error dialog instructing the visitor to '
+        'press Win+R and paste, or open a terminal and paste. The command then executes with user '
+        'privileges — typically downloading and running a second-stage payload (PowerShell stager, '
+        'Python dropper, or curl-piped script). The actual command the victim would paste is in '
+        'the evidence block.',
+    ),
     'CSS_OVERLAY_INJECTED': (
         'Fullscreen CSS overlay detected (ClickFix / SocGholish pattern)',
         'A CSS rule with position:fixed, full viewport width (100%/100vw), and full viewport '

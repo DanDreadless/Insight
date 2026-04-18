@@ -213,13 +213,16 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
     # the JS analyser emits MEDIUM for clipboard write outside a click handler.
     # Together they are a confirmed ClickFix delivery chain → CRITICAL.
     has_fake_captcha = _has_title_fragment('fake captcha') or _has_title_fragment('clickfix')
-    has_clipboard_write = _has_title_fragment('clipboard write outside')
+    has_clipboard_write = (
+        _has_title_fragment('clipboard write outside')
+        or _has_title_fragment('clipboard hijack')
+    )
     if has_fake_captcha and has_clipboard_write:
         if not any(f.get('title') == 'Context collapse: ClickFix malware delivery' for f in findings):
             trigger_parts: list[str] = []
             for f in findings:
                 title = f.get('title', '').lower()
-                if 'fake captcha' in title or 'clickfix' in title or 'clipboard write outside' in title:
+                if 'fake captcha' in title or 'clickfix' in title or 'clipboard write outside' in title or 'clipboard hijack' in title:
                     label = f.get('title', '')
                     ev = f.get('evidence', '').strip()
                     trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
@@ -250,13 +253,14 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
         _has_title_fragment('clickfix clipboard payload')
         or _has_title_fragment('fake captcha')
         or _has_title_fragment('clipboard write outside')
+        or _has_title_fragment('clipboard hijack')
     )
     if has_injected_script and has_clickfix_payload:
         if not any(f.get('title') == 'Context collapse: compromised site delivering ClickFix malware' for f in findings):
             trigger_parts: list[str] = []
             for f in findings:
                 title = f.get('title', '').lower()
-                if any(kw in title for kw in ('external script injection', 'clickfix', 'fake captcha', 'clipboard write outside')):
+                if any(kw in title for kw in ('external script injection', 'clickfix', 'fake captcha', 'clipboard write outside', 'clipboard hijack')):
                     label = f.get('title', '')
                     ev = f.get('evidence', '').strip()
                     trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
