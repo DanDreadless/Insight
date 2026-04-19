@@ -279,6 +279,10 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
             continue
         action_domain = _registrable_domain(action)
         if action_domain and action_domain != page_domain:
+            if is_known_good(action_domain) and not is_payment_processor(action_domain):
+                # Known-good marketing/CRM platform (Zoho, Mailchimp, HubSpot, etc.)
+                # Cross-domain submission to these is expected opt-in / lead-gen form behaviour.
+                continue
             if is_payment_processor(action_domain):
                 # Known payment processor — expected cross-domain form submission
                 findings.append({

@@ -217,6 +217,9 @@ MARKETING_DOMAINS: frozenset[str] = frozenset({
     'constantcontact.com',    # Constant Contact
     'campaignmonitor.com',    # Campaign Monitor
     'dotdigital.com',         # Dotdigital
+    'maillist-manage.com',    # Zoho Campaigns mailing list forms / optin scripts
+    'zoho.com',               # Zoho CRM / Campaigns
+    'apollo.io',              # Apollo.io B2B sales intelligence tracker
 })
 
 # CAPTCHA & purpose-built bot protection scripts.

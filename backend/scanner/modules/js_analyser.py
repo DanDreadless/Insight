@@ -973,8 +973,12 @@ def _check_forced_download(js: str) -> list[dict]:
     )
     exe_match = exe_pattern.search(js)
 
+    # Executable extension → HIGH (drive-by malware delivery).
+    # No extension identified → MEDIUM (could be a legitimate "download this PDF"
+    # button in a popup or export feature — severity reflects reduced confidence).
+    severity = 'HIGH' if exe_match else 'MEDIUM'
     findings.append({
-        'severity': 'HIGH',
+        'severity': severity,
         'category': 'JavaScript',
         'title': 'Forced file download via JavaScript',
         'description': (
@@ -1477,6 +1481,13 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
     # addScript() helper that uses the createElement/src/appendChild triad.
     # This is A/B testing infrastructure, not script injection.
     if '_vwo_code' in js or 'visualwebsiteoptimizer.com' in js:
+        return []
+
+    # Webpack bundle chunk loader — __webpack_require__.l is webpack's built-in
+    # async chunk loading mechanism. It creates a <script> element with a
+    # same-origin chunk URL at runtime to lazy-load code-split bundles.
+    # Present in every webpack-bundled app (Elementor, React, Next.js, etc.).
+    if '__webpack_require__' in js or 'webpackChunk' in js:
         return []
 
     # WordPress emoji detection loader — tests emoji rendering support via
