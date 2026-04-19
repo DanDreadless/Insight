@@ -437,6 +437,12 @@ def _check_high_entropy_strings(js: str, source_url: str = '') -> list[dict]:
         if re.match(r'sha(?:256|384|512)-[A-Za-z0-9+/=]+$', literal, re.IGNORECASE):
             continue
 
+        # Skip data URI strings — data:image/png;base64,... and similar are
+        # embedded images (icons, sprites, email widget branding).  They are
+        # legitimately high-entropy base64 but are never encoded attack payloads.
+        if re.match(r'data:[a-z]+/[a-z+\-]+;base64,', literal, re.IGNORECASE):
+            continue
+
         # Skip SVG path data — the `d` attribute of <path> elements contains
         # numeric coordinates and path commands (M, L, C, Z, etc.) that are
         # legitimately high entropy but are not encoded payloads.
@@ -689,6 +695,32 @@ def _check_keylogger(js: str) -> list[dict]:
     listener_region = js[key_m.start():min(len(js), key_m.start() + 600)]
     capture_m = capture_re.search(listener_region)
     if not capture_m:
+        return findings
+
+    # Exclude accessibility focus-trap patterns — GDPR cookie consent banners
+    # (Complianz, CookieYes, Borlabs, etc.) use keydown listeners to trap Tab
+    # focus within the consent dialog for keyboard accessibility (WCAG 2.1).
+    # These handlers check `e.key === "Tab"` or `"Escape"` and do NOT collect
+    # arbitrary keystrokes.  Real keyloggers must capture all keys, not just
+    # specific named navigation keys.
+    # Strategy: if the only key comparisons visible in the capture region are
+    # against specific named keys AND the key value is never stored/concatenated,
+    # this is an accessibility handler, not a keylogger.
+    nav_key_compare_re = re.compile(
+        r'(?:'
+        r'"(?:Tab|Escape|Esc|Enter|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|'
+        r'Home|End|PageUp|PageDown|Backspace|Delete|Space|Shift|Control|Alt|Meta|F\d{1,2})"'
+        r'|'
+        r"'(?:Tab|Escape|Esc|Enter|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|"
+        r"Home|End|PageUp|PageDown|Backspace|Delete|Space|Shift|Control|Alt|Meta|F\d{1,2})'"
+        r')',
+        re.IGNORECASE,
+    )
+    key_collect_re = re.compile(
+        r'(?:event|e|evt|ev)\s*\.\s*key\s*(?:[+\-]|\.|push|concat|join|\+=|=(?!=))',
+        re.IGNORECASE,
+    )
+    if nav_key_compare_re.search(listener_region) and not key_collect_re.search(listener_region):
         return findings
 
     # The exfiltration call must be close to where keystrokes are captured —
@@ -1618,6 +1650,13 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
     # unique to wp-emoji-release.min.js and does not appear in ad injectors or
     # Magecart skimmers.
     if 'everythingExceptFlag' in js:
+        return []
+
+    # Complianz GDPR consent management plugin — cmplz_run_script() is the
+    # plugin's consent-gate loader: it holds third-party scripts and injects
+    # them only after the visitor gives consent.  This is the plugin's core
+    # function, not script injection by an attacker.
+    if 'cmplz_run_script' in js or 'cmplz_banner' in js:
         return []
 
     # Match createElement('script') in both dot-notation and bracket-notation:
