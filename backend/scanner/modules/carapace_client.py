@@ -214,12 +214,40 @@ CARAPACE_FLAG_INFO: dict[str, tuple[str, str]] = {
 }
 
 
-def flags_to_findings(flags: list[dict], url: str) -> list[dict]:
-    """Convert Carapace threat report flags into Insight finding dicts."""
+# Point weights matching Carapace's recalculate_score() in threat/mod.rs.
+# Used to estimate how much of the risk_score is accounted for by reported findings.
+_CARAPACE_SEVERITY_PTS: dict[str, int] = {
+    'CRITICAL': 40,
+    'HIGH':     20,
+    'MEDIUM':   10,
+    'LOW':       5,
+}
+
+# Human-readable labels for skip-code flags surfaced in the sanitisation summary.
+_SKIP_CODE_LABELS: dict[str, str] = {
+    'BLOCKED_ELEMENT_SCRIPT':  ('script tag stripped',        'script tags stripped'),
+    'BLOCKED_ELEMENT_IFRAME':  ('iframe stripped',            'iframes stripped'),
+    'BLOCKED_ELEMENT_OTHER':   ('element stripped',           'elements stripped'),
+    'JAVASCRIPT_URL_STRIPPED': ('javascript: URL stripped',   'javascript: URLs stripped'),
+    'NETWORK_ATTEMPT_BLOCKED': ('source-level network request detected', 'source-level network requests detected'),
+}
+
+
+def flags_to_findings(flags: list[dict], url: str, risk_score: int = 0) -> list[dict]:
+    """Convert Carapace threat report flags into Insight finding dicts.
+
+    risk_score — Carapace's internal risk score (0–100).  When provided, a gap
+    between the score and the severity of reported findings surfaces a LOW finding
+    so analysts can see that Carapace's internal scoring is higher than the visible
+    flags alone would suggest.
+    """
     findings: list[dict] = []
+    skip_counts: dict[str, int] = {}
+
     for flag in flags:
         code = flag.get('code', '')
         if code in CARAPACE_SKIP_CODES:
+            skip_counts[code] = skip_counts.get(code, 0) + 1
             continue
         severity = CARAPACE_SEVERITY_MAP.get(flag.get('severity', 'low'), 'LOW')
         title, description = CARAPACE_FLAG_INFO.get(
@@ -234,6 +262,60 @@ def flags_to_findings(flags: list[dict], url: str) -> list[dict]:
             'evidence': flag.get('detail', ''),
             'resource_url': url,
         })
+
+    # Surface skip-code sanitisation counts as a single INFO finding so analysts
+    # can see how much activity Carapace stripped without being flooded by individual
+    # low-signal entries.
+    if skip_counts:
+        parts = []
+        for code in sorted(skip_counts):
+            n = skip_counts[code]
+            singular, plural = _SKIP_CODE_LABELS.get(code, (code, code))
+            parts.append(f'{n} {singular if n == 1 else plural}')
+        findings.append({
+            'severity': 'INFO',
+            'category': 'Renderer',
+            'title': 'Carapace sanitisation activity',
+            'description': (
+                'The Carapace renderer stripped or blocked elements before static analysis. '
+                'These are aggregated here rather than listed individually to avoid noise. '
+                'Elevated script-tag or network-request counts on a simple page warrant '
+                'closer inspection alongside other findings.'
+            ),
+            'evidence': '; '.join(parts),
+            'resource_url': url,
+        })
+
+    # If Carapace's risk score is materially higher than what the reported findings
+    # account for, the gap is driven by volume bonus from skip-code flags inside
+    # recalculate_score().  Surface it so the score is not silently unexplained.
+    if risk_score > 0:
+        expected_pts = sum(
+            _CARAPACE_SEVERITY_PTS.get(f['severity'], 0)
+            for f in findings
+            if f.get('category') == 'Renderer' and f['severity'] != 'INFO'
+        )
+        gap = risk_score - min(expected_pts, 100)
+        if gap >= 15:
+            findings.append({
+                'severity': 'LOW',
+                'category': 'Renderer',
+                'title': 'Carapace elevated internal risk score',
+                'description': (
+                    'Carapace\'s internal risk score is higher than the reported findings '
+                    'account for. The gap is typically caused by a high volume of sanitised '
+                    'elements — script tags, iframes, or source-level network requests — that '
+                    'each score below the reporting threshold but accumulate via Carapace\'s '
+                    'per-code volume bonus. Review the sanitisation activity finding for counts.'
+                ),
+                'evidence': (
+                    f'Carapace risk score: {risk_score}; '
+                    f'estimated finding contribution: {min(expected_pts, 100)}; '
+                    f'unexplained gap: {gap}'
+                ),
+                'resource_url': url,
+            })
+
     return findings
 
 

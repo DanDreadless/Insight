@@ -532,7 +532,8 @@ def run_scan(self, scan_job_id: str) -> dict:
             # Their legitimate JS bundles trigger false positives (new Function, cookie writes).
             if not is_known_good(final_url):
                 renderer_findings = _carapace_flags_to_findings(
-                    _carapace.get('carapace_flags', []), final_url
+                    _carapace.get('carapace_flags', []), final_url,
+                    _carapace['carapace_risk'],
                 )
                 if renderer_findings:
                     logger.info(
