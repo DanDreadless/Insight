@@ -60,7 +60,7 @@ _FAKE_UPDATE_ACTION_RE = re.compile(
     r'\b(?:update|upgrade|install|download|outdated|new\s+version|latest\s+version)\b',
     re.IGNORECASE,
 )
-_FAKE_UPDATE_EXEC_RE = re.compile(r'\.(?:exe|msi|dmg|pkg)\b', re.IGNORECASE)
+_FAKE_UPDATE_EXEC_RE = re.compile(r'\.(?:exe|msi|dmg|pkg|zip|7z)\b', re.IGNORECASE)
 
 _IPFS_GATEWAY_RE = re.compile(
     r'https?://(?:'

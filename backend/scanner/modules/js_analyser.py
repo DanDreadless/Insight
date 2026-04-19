@@ -1434,6 +1434,76 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
     return findings
 
 
+def _check_execcommand_clipboard(js: str) -> list[dict]:
+    """
+    Detect legacy ClickFix clipboard writes using document.execCommand('copy').
+
+    Older ClickFix pages (pre-2025) use the deprecated execCommand API instead of
+    navigator.clipboard.writeText().  The pattern: a shell command string is
+    assigned to a DOM element (textarea/input) which is then selected and copied.
+    The payload string is near the execCommand call, not in its arguments.
+
+    This is completely blind to _check_clipboard_hijacking() which only checks
+    navigator.clipboard.writeText().
+    """
+    findings: list[dict] = []
+    m = re.search(r"document\s*\.\s*execCommand\s*\(\s*['\"]copy['\"]\s*\)", js, re.IGNORECASE)
+    if not m:
+        return findings
+
+    # Reuse the same shell-indicator regex as _check_clipboard_hijacking
+    _SHELL_CMD_RE = re.compile(
+        r'powershell|mshta\.exe|mshta\b|cmd\.exe|rundll32|regsvr32|'
+        r'wscript\.exe|cscript\.exe|wscript\b|cscript\b|'
+        r'invoke-expression|\biex\b|invoke-restmethod|\birm\b|'
+        r'nslookup\b|certutil\b|msiexec\b|'
+        r'base64\s+-d|\|\s*bash|\|\s*sh\b|'
+        r'curl\b.{0,40}https?://|wget\b.{0,40}https?://',
+        re.IGNORECASE,
+    )
+
+    # Scan 2KB before the execCommand call — the payload is typically assigned
+    # to a textarea.value or element.textContent in the lines just before the copy
+    region = js[max(0, m.start() - 2000): m.end() + 200]
+
+    shell_m = _SHELL_CMD_RE.search(region)
+    if shell_m:
+        findings.append({
+            'severity': 'CRITICAL',
+            'category': 'JavaScript',
+            'title': 'ClickFix clipboard payload — shell command written via execCommand',
+            'description': (
+                'document.execCommand("copy") is called with a shell command string '
+                'visible in the surrounding context. This is the legacy ClickFix technique: '
+                'a malicious command is written to a hidden DOM element, selected, then '
+                'copied to the clipboard using the deprecated execCommand API, before the '
+                'user is socially engineered into pasting and executing it. '
+                'Functionally identical to the navigator.clipboard.writeText() variant.'
+            ),
+            'evidence': (
+                f'[Shell indicator near execCommand("copy")]\n{shell_m.group(0)}\n\n'
+                f'[Context]\n{_snippet(js, m)}'
+            ),
+        })
+    else:
+        # execCommand('copy') with no obvious shell payload — could be a legitimate
+        # "copy to clipboard" button using the old API.  Flag MEDIUM (same reasoning
+        # as the writeText() fallback: cannot confirm benign without user-gesture context).
+        findings.append({
+            'severity': 'MEDIUM',
+            'category': 'JavaScript',
+            'title': 'Clipboard write via legacy execCommand("copy")',
+            'description': (
+                'Script uses the deprecated document.execCommand("copy") to write to the '
+                'clipboard. No shell command payload detected in the immediate context. '
+                'May be a legacy "copy to clipboard" button or an obfuscated ClickFix payload '
+                'where the command string is dynamically assembled.'
+            ),
+            'evidence': f'[execCommand copy call]\n{_snippet(js, m)}',
+        })
+    return findings
+
+
 def _check_document_write_external_script(js: str) -> list[dict]:
     findings: list[dict] = []
     pattern = re.compile(
@@ -2757,6 +2827,7 @@ def analyse_js(js_content: str, source_url: str = '', beautify: bool = True) -> 
         add_findings(_check_devtools_detection(js))
         add_findings(_check_sendbeacon_external(js, source_url))
         add_findings(_check_clipboard_hijacking(js))
+        add_findings(_check_execcommand_clipboard(js))
         add_findings(_check_document_write_external_script(js))
         add_findings(_check_dom_script_injection(js, source_url))
         add_findings(_check_shell_dropper(js))
