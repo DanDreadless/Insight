@@ -594,6 +594,21 @@ def _check_cookie_exfiltration(js: str) -> list[dict]:
     if not bridge_re.search(nearby_region):
         return findings
 
+    # Only fire if there is an external (absolute URL) network call nearby.
+    # A fetch with a relative URL (starting with '/') is same-origin — the
+    # data never leaves the site.  LiteSpeed Cache's guest.vary.php is the
+    # canonical example: it reads _lscache_vary from document.cookie, then
+    # posts to /wp-content/plugins/litespeed-cache/guest.vary.php.
+    external_call_re = re.compile(
+        r'(?:'
+        r'(?:fetch|sendBeacon)\s*\(\s*["\'\`]https?://'
+        r'|\.open\s*\(\s*["\'][A-Z]+["\']\s*,\s*["\']https?://'
+        r')',
+        re.IGNORECASE,
+    )
+    if not external_call_re.search(nearby_region):
+        return findings
+
     findings.append({
         'severity': 'CRITICAL',
         'category': 'JavaScript',

@@ -80,6 +80,10 @@ CDN_DOMAINS: frozenset[str] = frozenset({
     'typekit.net',            # Adobe Fonts CDN
     'parastorage.com',        # Wix platform CDN — versioned React, core-js, Thunderbolt engine
     'sentry-cdn.com',         # Sentry browser error tracking SDK
+    'wp.com',                 # Automattic CDN/stats (stats.wp.com = Jetpack analytics,
+                              # s.wp.com / i.wp.com = WordPress media/image CDN).
+                              # NOTE: wordpress.com hosting is still excluded — this covers
+                              # only *.wp.com CDN scripts loaded on third-party sites.
 })
 
 # Site-builder platform CDNs.
