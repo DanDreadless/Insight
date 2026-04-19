@@ -254,6 +254,13 @@ NOCODE_DOMAINS: frozenset[str] = frozenset({
     'webflowcdn.com',         # Webflow CDN
 })
 
+# Specific subdomain exceptions — known-good subdomains of otherwise-excluded registrable domains.
+# Used when the subdomain provides a distinct, trusted service but allowing the parent registrable
+# domain wholesale would suppress real threat signals (e.g. Cloudflare WAF abuse).
+KNOWN_GOOD_HOSTS: frozenset[str] = frozenset({
+    'cdnjs.cloudflare.com',   # Cloudflare's open-source library CDN (analogous to jsDelivr)
+})
+
 # ---------------------------------------------------------------------------
 # Combined lookup set
 # ---------------------------------------------------------------------------
@@ -282,8 +289,17 @@ def _registrable(url_or_host: str) -> str:
     return f'{ext.domain}.{ext.suffix}' if ext.suffix else ext.domain
 
 
+def _fqdn(url_or_host: str) -> str:
+    """Return the fully-qualified hostname (subdomain.domain.tld) from a URL or hostname."""
+    ext = tldextract.extract(url_or_host)
+    parts = [p for p in (ext.subdomain, ext.domain, ext.suffix) if p]
+    return '.'.join(parts)
+
+
 def is_known_good(url_or_host: str) -> bool:
-    """Return True if the URL/hostname belongs to any known-good domain."""
+    """Return True if the URL/hostname belongs to any known-good domain or trusted subdomain."""
+    if _fqdn(url_or_host) in KNOWN_GOOD_HOSTS:
+        return True
     return _registrable(url_or_host) in ALL_KNOWN_GOOD
 
 
