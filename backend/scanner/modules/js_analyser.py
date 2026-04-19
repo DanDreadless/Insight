@@ -393,6 +393,8 @@ _JS_KEYWORDS = frozenset([
     'font-family', 'font-style', 'src: url(', '@font-face',
     # Minified code operators — common in any minified JS, rare in encoded payloads
     '&&', '||', '===', '!==', '+=', '-=', '++', '--', '!0', '!1',
+    # Webpack/modern JS bundle patterns — always code, never encoded payloads
+    'Object.defineProperty', 'Promise.all(', '.then(', '.bind(',
 ])
 
 
@@ -1556,23 +1558,16 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
         re.IGNORECASE,
     )
 
+    # Determine whether the whole script is a webpack bundle at file level.
+    # Webpack bundles always contain the __webpack_require__ runtime — any
+    # createElement('script') inside is almost certainly a chunk loader.
+    # Exception: we still fire when we can extract an explicit external URL
+    # that is NOT a same-origin chunk path, because an attacker could inject
+    # a malicious loader into a webpack-bundled page and hardcode the C2 URL.
+    is_webpack_file = '__webpack_require__' in js or 'webpackChunk' in js
+
     findings = []
-    # Iterate over every createElement('script') call — previously the function
-    # bailed on the first match which meant a single webpack call suppressed all
-    # subsequent malicious injections in the same file.
-    # Webpack suppression is now per-match: we check the local context window
-    # (200 chars before + 1500 chars after) rather than the whole file, so a
-    # webpack chunk loader does not mask an attacker-injected script loader
-    # elsewhere in the same page.
     for m in create_re.finditer(js):
-        local_window = js[max(0, m.start() - 200): min(len(js), m.start() + 1500)]
-
-        # Webpack bundle chunk loader — suppress only when the call itself is
-        # inside webpack's module-loading machinery, not when webpack appears
-        # somewhere else in the file.
-        if '__webpack_require__' in local_window or 'webpackChunk' in local_window:
-            continue
-
         # Look for appendChild within 1500 chars after the createElement call
         forward_window = js[m.start(): min(len(js), m.start() + 1500)]
 
@@ -1580,9 +1575,7 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
         if not has_append:
             continue
 
-        # src assignment in either notation:
-        #   dot:     elem.src = url
-        #   bracket: elem['src'] = url  or  elem["src"] = url
+        # src assignment in either notation
         has_src = bool(re.search(
             r"""(?:['"]\s*src\s*['"]\s*\]\s*=|\.src\s*=)""",
             forward_window,
@@ -1591,13 +1584,17 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
         if not has_src:
             continue
 
-        # Try to extract the actual URL being injected — include in evidence so
-        # the analyst doesn't need to read through the code to find it.
         injected_src = _extract_injected_script_src(forward_window)
 
-        # If the injected script src resolves to a known-good domain, suppress —
-        # this is standard platform initialisation (e.g. Wix loading its own CDN
-        # scripts) rather than a malicious second-stage payload drop.
+        # Webpack file: only fire if we have an explicit external https:// URL
+        # that is not a known-good domain.  Variable URLs inside webpack bundles
+        # are chunk loaders — always benign.
+        if is_webpack_file:
+            if not injected_src or injected_src.startswith('<variable'):
+                continue  # webpack chunk loader with dynamic URL
+            # Fall through to the known-good check below for explicit URLs
+
+        # If the injected script src resolves to a known-good domain, suppress
         if injected_src and not injected_src.startswith('<variable'):
             if is_known_good(injected_src):
                 continue
@@ -1619,9 +1616,7 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
             ),
             'evidence': '\n\n'.join(evidence_parts),
         })
-        # Only report once per file to avoid flooding on minified bundles with
-        # repeated loader patterns.
-        break
+        break  # one finding per script
 
     return findings
 

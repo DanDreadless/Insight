@@ -84,6 +84,7 @@ CDN_DOMAINS: frozenset[str] = frozenset({
                               # s.wp.com / i.wp.com = WordPress media/image CDN).
                               # NOTE: wordpress.com hosting is still excluded — this covers
                               # only *.wp.com CDN scripts loaded on third-party sites.
+    'sirv.com',               # Sirv image CDN & DAM (sirv.com, scripts.sirv.com)
 })
 
 # Site-builder platform CDNs.

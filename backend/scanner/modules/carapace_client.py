@@ -22,6 +22,7 @@ import logging
 import os
 
 import requests as _requests
+from scanner.modules.known_good_domains import is_known_good
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,15 @@ CARAPACE_SEVERITY_MAP: dict[str, str] = {
     'medium':   'MEDIUM',
     'low':      'LOW',
 }
+
+# Flag codes whose severity is clamped to LOW regardless of what Carapace
+# assigns.  These are valid aggregate signals (they still contribute to
+# context_collapse) but fire too frequently on legitimate sites to be
+# standalone MEDIUM findings.
+CARAPACE_LOW_SEVERITY_CODES: frozenset[str] = frozenset({
+    'INNER_HTML_MUTATION',    # Ubiquitous on WordPress/Elementor; not a standalone threat
+    'EVENT_HANDLER_STRIPPED', # Sanitiser artefact; inline onclick common in themes/builders
+})
 
 # (title, analyst-facing description) for each flag code.
 CARAPACE_FLAG_INFO: dict[str, tuple[str, str]] = {
@@ -259,17 +269,33 @@ def flags_to_findings(flags: list[dict], url: str, risk_score: int = 0) -> list[
         if code in CARAPACE_SKIP_CODES:
             skip_counts[code] = skip_counts.get(code, 0) + 1
             continue
+
+        detail = flag.get('detail', '')
+
+        # For INTERCEPTED_REQUEST, filter out known-good CDN domains so that
+        # legitimate image CDNs (Sirv, etc.) don't trigger a network-intercept
+        # finding.  Suppress the finding entirely if all intercepted URLs are
+        # known-good; otherwise emit it with only the suspicious URLs.
+        if code == 'INTERCEPTED_REQUEST':
+            raw_lines = [ln.strip() for ln in detail.splitlines() if ln.strip()]
+            unknown_urls = [u for u in raw_lines if not is_known_good(u)]
+            if not unknown_urls:
+                continue
+            detail = '\n'.join(f'  {u}' for u in unknown_urls)
+
         severity = CARAPACE_SEVERITY_MAP.get(flag.get('severity', 'low'), 'LOW')
+        if code in CARAPACE_LOW_SEVERITY_CODES:
+            severity = 'LOW'
         title, description = CARAPACE_FLAG_INFO.get(
             code,
-            (f'Renderer: {code}', f'Carapace renderer reported: {flag.get("detail", "")}'),
+            (f'Renderer: {code}', f'Carapace renderer reported: {detail}'),
         )
         findings.append({
             'severity': severity,
             'category': 'Renderer',
             'title': title,
             'description': description,
-            'evidence': flag.get('detail', ''),
+            'evidence': detail,
             'resource_url': url,
         })
 
