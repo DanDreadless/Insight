@@ -460,7 +460,7 @@ def run_scan(target_url, verbose=True):
             _cr.raise_for_status()
             _cd = _cr.json()
             _ct = _cd.get('threat_report', {})
-            _renderer_findings = _c_flags(_ct.get('flags', []), final_url)
+            _renderer_findings = _c_flags(_ct.get('flags', []), final_url, _ct.get('risk_score', 0))
             all_findings.extend(_renderer_findings)
             if verbose:
                 print(f"      risk={_ct.get('risk_score', 0)} | "
