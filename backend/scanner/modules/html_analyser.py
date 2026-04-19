@@ -984,4 +984,44 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
                 ),
             })
 
+    # ------------------------------------------------------------------
+    # REC-10 — GTM present on e-commerce / payment page
+    # ------------------------------------------------------------------
+    # Magecart actors exploited compromised GTM containers to inject skimmers
+    # into Magento sites (Malwarebytes Labs, 2025).  GTM container contents are
+    # served dynamically by Google's infrastructure and cannot be inspected by
+    # static analysis.  When GTM is loaded on a page that also shows payment UI,
+    # we surface a LOW finding so analysts know the container is uninspectable
+    # and manual verification is warranted.
+    #
+    # Only fires when payment indicators are present alongside GTM — not on
+    # every GTM-using site — to keep this targeted and low-noise.
+    _GTM_RE = re.compile(
+        r'googletagmanager\.com/gtm\.js\?id=GTM-[A-Z0-9]+',
+        re.IGNORECASE,
+    )
+    _PAYMENT_INDICATOR_RE = re.compile(
+        r'card[-_\s]?(?:number|num|holder|no\b)|cvv\b|cvc\b|expir|'
+        r'checkout|payment[-_\s]?form|billing[-_\s]?(?:address|form)|'
+        r'stripe\.js|paypal\.com|square\.com',
+        re.IGNORECASE,
+    )
+    if _GTM_RE.search(html) and _PAYMENT_INDICATOR_RE.search(html):
+        gtm_m = _GTM_RE.search(html)
+        findings.append({
+            'severity': 'LOW',
+            'category': 'HTML',
+            'title': 'Google Tag Manager present on payment page — container uninspectable',
+            'description': (
+                'Google Tag Manager (GTM) is loaded on a page that also contains payment or '
+                'checkout UI. GTM container contents are served dynamically and cannot be '
+                'inspected by static analysis. In early 2025, Magecart actors exploited '
+                'compromised GTM containers to inject skimmers into Magento-based e-commerce '
+                'sites (Malwarebytes Labs). If this site processes card payments, the GTM '
+                'container should be audited in the GTM console to verify no unknown tags '
+                'or custom HTML tags are present.'
+            ),
+            'evidence': f'[GTM script tag]\n{gtm_m.group(0)}\n[Payment indicator present in page]',
+        })
+
     return findings

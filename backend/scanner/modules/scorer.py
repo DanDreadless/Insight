@@ -380,5 +380,87 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
                 'evidence': evidence_block,
             })
 
+    # Context 10 (REC-12): Magecart skimmer + WebSocket C2 channel
+    # Magecart variants documented in 2025 use WebSocket for bidirectional C2
+    # communication after capturing card data — bypassing HTTP proxy inspection.
+    # The combination of a confirmed skimmer finding and a WebSocket attempt is
+    # near-certain evidence of a sophisticated active campaign.
+    has_skimmer_finding = (
+        _has_title_fragment('payment card skimmer')
+        or _has_title_fragment('checkout-page skimmer')
+        or _has_title_fragment('mutationobserver-based payment')
+        or _has_title_fragment('smart-contract-backed skimmer')
+    )
+    has_websocket = _has_title_fragment('websocket')
+    if has_skimmer_finding and has_websocket:
+        if not any(f.get('title') == 'Context collapse: Magecart skimmer with WebSocket C2' for f in findings):
+            trigger_parts: list[str] = []
+            for f in findings:
+                title = f.get('title', '').lower()
+                if any(kw in title for kw in ('skimmer', 'websocket')):
+                    label = f.get('title', '')
+                    ev = f.get('evidence', '').strip()
+                    trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
+            evidence_block = '\n\n'.join(trigger_parts) if trigger_parts else (
+                'Payment card skimmer + WebSocket C2 channel detected'
+            )
+            synthetic.append({
+                'severity': 'CRITICAL',
+                'category': 'Threat',
+                'title': 'Context collapse: Magecart skimmer with WebSocket C2',
+                'description': (
+                    'A payment card skimmer was detected alongside a WebSocket connection attempt. '
+                    'Magecart variants documented in 2025 (JScrambler, Akamai) use WebSocket as a '
+                    'bidirectional C2 channel to exfiltrate stolen card data, bypassing HTTP proxy '
+                    'inspection and network-layer DLP controls. This combination confirms an active, '
+                    'sophisticated skimmer campaign. The merchant site must be taken offline and '
+                    'audited immediately — customers are actively at risk.'
+                ),
+                'evidence': evidence_block,
+            })
+
+    # Context 11 (REC-15): LoTS exfiltration + active data theft signal
+    # Living-off-Trusted-Sites (Telegram, Discord, Slack, webhook services) is
+    # HIGH in isolation — some legitimate sites send webhook notifications.
+    # When combined with an active data theft signal (skimmer, keylogger, form
+    # hijacking, credential harvest) the combination is unambiguously malicious:
+    # a legitimate notification integration has no reason to be on the same page
+    # as card skimming or credential harvesting code.
+    has_lots = _has_title_fragment('living off trusted sites')
+    has_data_theft = (
+        _has_title_fragment('payment card skimmer')
+        or _has_title_fragment('keylogger')
+        or _has_title_fragment('form hijacking')
+        or _has_title_fragment('session theft')
+        or _has_title_fragment('credential harvest')
+        or _has_title_fragment('cookie exfiltration')
+    )
+    if has_lots and has_data_theft:
+        if not any(f.get('title') == 'Context collapse: LoTS exfiltration with active data theft' for f in findings):
+            trigger_parts: list[str] = []
+            for f in findings:
+                title = f.get('title', '').lower()
+                if any(kw in title for kw in ('living off trusted sites', 'skimmer', 'keylogger', 'form hijacking', 'session theft', 'cookie exfiltration')):
+                    label = f.get('title', '')
+                    ev = f.get('evidence', '').strip()
+                    trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
+            evidence_block = '\n\n'.join(trigger_parts) if trigger_parts else (
+                'LoTS exfiltration channel + active data theft detected'
+            )
+            synthetic.append({
+                'severity': 'CRITICAL',
+                'category': 'Threat',
+                'title': 'Context collapse: LoTS exfiltration with active data theft',
+                'description': (
+                    'A Living-off-Trusted-Sites (LoTS) exfiltration channel (Telegram Bot API, '
+                    'Discord Webhook, Slack, or similar) was detected alongside an active data '
+                    'theft signal (skimmer, keylogger, form hijacking, or session theft). '
+                    'The LoTS channel is the exfiltration method: stolen data is relayed through '
+                    'a trusted platform to evade network-level blocking. No legitimate webhook '
+                    'integration has any business co-existing with data theft code on the same page.'
+                ),
+                'evidence': evidence_block,
+            })
+
     findings.extend(synthetic)
     return findings

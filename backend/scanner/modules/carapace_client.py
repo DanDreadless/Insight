@@ -174,6 +174,16 @@ CARAPACE_FLAG_INFO: dict[str, tuple[str, str]] = {
         'environments. No legitimate site functionality depends on this check in a way that '
         'would require it to be present in production page code.',
     ),
+    'SANDBOX_EVASION_CANVAS_FINGERPRINT': (
+        'Sandbox evasion: WebGL canvas fingerprinting',
+        'A script accessed the WEBGL_debug_renderer_info extension or UNMASKED_RENDERER_WEBGL / '
+        'UNMASKED_VENDOR_WEBGL constants to read GPU vendor and renderer strings. These differ '
+        'between real browsers and headless Chromium, making this a reliable anti-analysis probe. '
+        'Phishing kits (Tycoon2FA and derivatives) use WebGL fingerprinting to detect automated '
+        'analysis environments and serve a clean page to scanners while serving the phishing '
+        'form to real users. No legitimate page functionality requires these specific GPU '
+        'identifier strings.',
+    ),
     'CLIPBOARD_HIJACK': (
         'Clipboard hijack: JavaScript wrote to the system clipboard',
         'JavaScript on this page called navigator.clipboard.writeText() or registered a copy '

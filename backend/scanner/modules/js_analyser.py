@@ -1292,7 +1292,10 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
     # surrounding the call (covers the variable-assignment pattern).
     _SHELL_CMD_RE = re.compile(
         r'powershell|mshta\.exe|mshta\b|cmd\.exe|rundll32|regsvr32|'
-        r'wscript|cscript|invoke-expression|\biex\b|invoke-restmethod|\birm\b|'
+        r'wscript\.exe|cscript\.exe|wscript\b|cscript\b|'
+        r'invoke-expression|\biex\b|invoke-restmethod|\birm\b|'
+        # LoLBAS staging tools used in ClickFix DNS-staging chains (Microsoft, Jan 2026)
+        r'nslookup\b|certutil\b|msiexec\b|'
         r'base64\s+-d|\|\s*bash|\|\s*sh\b|'
         r'curl\b.{0,40}https?://|wget\b.{0,40}https?://',
         re.IGNORECASE,
@@ -1330,7 +1333,46 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
         })
         return findings  # CRITICAL already emitted — skip INFO/MEDIUM below
 
-    # --- Check 2: Is the write user-triggered (heuristic)? ------------------
+    # --- Check 2: ConsentFix — OAuth authorization URL written to clipboard --
+    # ConsentFix (Push Security, Oct 2025) is a ClickFix variant that places an
+    # OAuth authorization URL in the clipboard.  The victim pastes it into their
+    # browser address bar, granting the attacker an OAuth token for a cloud app.
+    # The payload contains no shell commands — only the OAuth URL — so the shell
+    # check above misses it.  We detect it via the URL structure.
+    _OAUTH_URL_RE = re.compile(
+        r'(?:'
+        r'client_id\s*=.{0,300}redirect_uri\s*=\s*https?://'
+        r'|response_type\s*=\s*(?:code|token).{0,300}client_id\s*='
+        r'|/oauth2?/(?:authorize|auth)[?&]'
+        r')',
+        re.IGNORECASE | re.DOTALL,
+    )
+    oauth_in_arg = bool(write_arg_m and _OAUTH_URL_RE.search(write_arg_m.group(1)))
+    oauth_in_region = bool(_OAUTH_URL_RE.search(call_region))
+    if oauth_in_arg or oauth_in_region:
+        payload_evidence = (
+            f'[OAuth clipboard payload — literal argument]\n{write_arg_m.group(1)[:500]}'
+            if write_arg_m else
+            f'[OAuth URL indicator near writeText() call]\n{_snippet(js, m)}'
+        )
+        findings.append({
+            'severity': 'CRITICAL',
+            'category': 'JavaScript',
+            'title': 'ConsentFix — OAuth authorization URL written to clipboard',
+            'description': (
+                'navigator.clipboard.writeText() is called with a value containing OAuth '
+                'authorization URL parameters (client_id=, redirect_uri=, response_type=). '
+                'This is the ConsentFix technique (Push Security, 2025): an evolution of '
+                'ClickFix where the victim pastes an OAuth URL into their browser address bar, '
+                'granting the attacker OAuth tokens for cloud applications (Microsoft 365, '
+                'Google Workspace, etc.) without entering credentials. No endpoint execution '
+                'is required — the attack happens entirely in the browser.'
+            ),
+            'evidence': payload_evidence,
+        })
+        return findings
+
+    # --- Check 3: Is the write user-triggered (heuristic)? ------------------
     # Legitimate "copy to clipboard" buttons are inside click/event handlers.
     # Malicious clipboard hijackers fire on page load or in setInterval — not
     # in direct response to a user gesture.
@@ -1498,13 +1540,6 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
     if '_vwo_code' in js or 'visualwebsiteoptimizer.com' in js:
         return []
 
-    # Webpack bundle chunk loader — __webpack_require__.l is webpack's built-in
-    # async chunk loading mechanism. It creates a <script> element with a
-    # same-origin chunk URL at runtime to lazy-load code-split bundles.
-    # Present in every webpack-bundled app (Elementor, React, Next.js, etc.).
-    if '__webpack_require__' in js or 'webpackChunk' in js:
-        return []
-
     # WordPress emoji detection loader — tests emoji rendering support via
     # OffscreenCanvas/Canvas, then conditionally injects the emoji polyfill.
     # Fingerprinted by the `everythingExceptFlag` supports-object key, which is
@@ -1520,56 +1555,75 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
         r"createElement\s*(?:['\"]?\s*\])?\s*\(\s*['\"]script['\"]\s*\)",
         re.IGNORECASE,
     )
-    m = create_re.search(js)
-    if not m:
-        return []
 
-    # Look for appendChild within 1500 chars after the createElement call
-    window = js[m.start(): min(len(js), m.start() + 1500)]
+    findings = []
+    # Iterate over every createElement('script') call — previously the function
+    # bailed on the first match which meant a single webpack call suppressed all
+    # subsequent malicious injections in the same file.
+    # Webpack suppression is now per-match: we check the local context window
+    # (200 chars before + 1500 chars after) rather than the whole file, so a
+    # webpack chunk loader does not mask an attacker-injected script loader
+    # elsewhere in the same page.
+    for m in create_re.finditer(js):
+        local_window = js[max(0, m.start() - 200): min(len(js), m.start() + 1500)]
 
-    has_append = bool(re.search(r'appendChild\b', window, re.IGNORECASE))
-    if not has_append:
-        return []
+        # Webpack bundle chunk loader — suppress only when the call itself is
+        # inside webpack's module-loading machinery, not when webpack appears
+        # somewhere else in the file.
+        if '__webpack_require__' in local_window or 'webpackChunk' in local_window:
+            continue
 
-    # src assignment in either notation:
-    #   dot:     elem.src = url
-    #   bracket: elem['src'] = url  or  elem["src"] = url
-    has_src = bool(re.search(
-        r"""(?:['"]\s*src\s*['"]\s*\]\s*=|\.src\s*=)""",
-        window,
-        re.IGNORECASE,
-    ))
-    if not has_src:
-        return []
+        # Look for appendChild within 1500 chars after the createElement call
+        forward_window = js[m.start(): min(len(js), m.start() + 1500)]
 
-    # Try to extract the actual URL being injected — include in evidence so
-    # the analyst doesn't need to read through the code to find it.
-    injected_src = _extract_injected_script_src(window)
+        has_append = bool(re.search(r'appendChild\b', forward_window, re.IGNORECASE))
+        if not has_append:
+            continue
 
-    evidence_parts = [f'[Injection code]\n{_snippet(js, m)}']
-    if injected_src:
-        evidence_parts.append(f'[Injected script URL]\n{injected_src}')
+        # src assignment in either notation:
+        #   dot:     elem.src = url
+        #   bracket: elem['src'] = url  or  elem["src"] = url
+        has_src = bool(re.search(
+            r"""(?:['"]\s*src\s*['"]\s*\]\s*=|\.src\s*=)""",
+            forward_window,
+            re.IGNORECASE,
+        ))
+        if not has_src:
+            continue
 
-    # If the injected script src resolves to a known-good domain, suppress —
-    # this is standard platform initialisation (e.g. Wix loading its own CDN
-    # scripts) rather than a malicious second-stage payload drop.
-    if injected_src and not injected_src.startswith('<variable'):
-        if is_known_good(injected_src):
-            return []
+        # Try to extract the actual URL being injected — include in evidence so
+        # the analyst doesn't need to read through the code to find it.
+        injected_src = _extract_injected_script_src(forward_window)
 
-    return [{
-        'severity': 'HIGH',
-        'category': 'JavaScript',
-        'title': 'Dynamic script injection — createElement + src + appendChild',
-        'description': (
-            'Script creates a <script> element, assigns an external src, and appends it '
-            'to the document. This DOM-based loader is equivalent to document.write(<script src=...>) '
-            'but harder to block with CSP and invisible to naive static analysis. '
-            'Commonly used in ad injectors, Magecart skimmers, and JavaScript droppers to '
-            'pull a second-stage payload into the page at runtime.'
-        ),
-        'evidence': '\n\n'.join(evidence_parts),
-    }]
+        # If the injected script src resolves to a known-good domain, suppress —
+        # this is standard platform initialisation (e.g. Wix loading its own CDN
+        # scripts) rather than a malicious second-stage payload drop.
+        if injected_src and not injected_src.startswith('<variable'):
+            if is_known_good(injected_src):
+                continue
+
+        evidence_parts = [f'[Injection code]\n{_snippet(js, m)}']
+        if injected_src:
+            evidence_parts.append(f'[Injected script URL]\n{injected_src}')
+
+        findings.append({
+            'severity': 'HIGH',
+            'category': 'JavaScript',
+            'title': 'Dynamic script injection — createElement + src + appendChild',
+            'description': (
+                'Script creates a <script> element, assigns an external src, and appends it '
+                'to the document. This DOM-based loader is equivalent to document.write(<script src=...>) '
+                'but harder to block with CSP and invisible to naive static analysis. '
+                'Commonly used in ad injectors, Magecart skimmers, and JavaScript droppers to '
+                'pull a second-stage payload into the page at runtime.'
+            ),
+            'evidence': '\n\n'.join(evidence_parts),
+        })
+        # Only report once per file to avoid flooding on minified bundles with
+        # repeated loader patterns.
+        break
+
+    return findings
 
 
 def _check_shell_dropper(js: str) -> list[dict]:
@@ -2202,6 +2256,435 @@ def _check_dynamic_import_external(js: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# REC-01 — JSFuck / JSFireTruck obfuscation
+# ---------------------------------------------------------------------------
+
+def _check_jsfuck_obfuscation(js: str) -> list[dict]:
+    """
+    Detect JSFuck / JSFireTruck obfuscation — JavaScript encoded using only []()+!.
+
+    JSFuck (2009) and its derivative JSFireTruck encode arbitrary JavaScript using
+    six characters via type coercion.  All existing obfuscation checks (hex, entropy,
+    fromCharCode, _0x) are completely blind to this encoding.
+
+    Signal: 300+ consecutive characters drawn exclusively from [ ] ( ) + !
+    This density is impossible in legitimate code.  Over 269,000 websites were
+    compromised with JSFireTruck in a single month (Unit 42 / Palo Alto, Apr 2025).
+    """
+    findings: list[dict] = []
+    m = re.search(r'[\[\]()+!]{300,}', js)
+    if not m:
+        return findings
+    matched = m.group(0)
+    snippet_val = matched[:200] + ('...' if len(matched) > 200 else '')
+    findings.append({
+        'severity': 'HIGH',
+        'category': 'JavaScript',
+        'title': 'JSFuck/JSFireTruck obfuscation detected',
+        'description': (
+            'A block of JavaScript encoded using only the six characters []()+! was found. '
+            'This technique (JSFuck / JSFireTruck) uses JavaScript type coercion to represent '
+            'arbitrary code — all standard obfuscation checks (hex escapes, entropy, fromCharCode, '
+            '_0x) are blind to it. Over 269,000 websites were compromised with JSFireTruck in a '
+            'single month in 2025 (Unit 42). The encoded segment must be decoded to determine '
+            'its purpose — the obfuscation itself is the threat indicator.'
+        ),
+        'evidence': f'[JSFuck/JSFireTruck encoded segment — {len(matched)} chars]\n{snippet_val}',
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# REC-02 — JJEncode obfuscation
+# ---------------------------------------------------------------------------
+
+def _check_jjencode_obfuscation(js: str) -> list[dict]:
+    """
+    Detect JJEncode obfuscation — JavaScript encoded using an 18-character ASCII set.
+
+    JJEncode produces a distinctive initialisation: $=~[] followed by a structured
+    object with property names like ___, $$$$, etc.  Companion technique to JSFuck.
+    """
+    findings: list[dict] = []
+    m = re.search(r'\$\s*=\s*~\[\]|\$\$\s*=\s*!\[\]', js)
+    if not m:
+        return findings
+    # Require ≥200 chars in the surrounding context to exclude incidental
+    # bitwise NOT expressions like `$=~0` in compact utility code.
+    vicinity = js[max(0, m.start() - 20): min(len(js), m.end() + 500)]
+    if len(vicinity.strip()) < 200:
+        return findings
+    findings.append({
+        'severity': 'HIGH',
+        'category': 'JavaScript',
+        'title': 'JJEncode obfuscation detected',
+        'description': (
+            'A JJEncode initialisation pattern ($=~[] or $$=![]) was found. '
+            'JJEncode encodes arbitrary JavaScript using an 18-character ASCII set, '
+            'making the code unreadable and bypassing signature-based detection. '
+            'JJEncode is used in malvertising and web compromise campaigns to hide '
+            'redirect chains and payload droppers. The encoded segment must be decoded '
+            'to determine its purpose.'
+        ),
+        'evidence': f'[JJEncode initialisation]\n{_snippet(js, m)}',
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# REC-03 — NDSW / NDSX WordPress injection (Balada Injector family)
+# ---------------------------------------------------------------------------
+
+def _check_ndsw_injection(js: str) -> list[dict]:
+    """
+    Detect Balada Injector / NDSW/NDSX WordPress malware.
+
+    The NDSW/NDSX campaign is one of the most prolific WordPress compromise
+    vectors — 43,106 detections in H1 2024 alone (Sucuri SiteCheck).  The malware
+    checks a global sentinel variable before executing, using a PHP proxy to
+    dynamically serve the injection.  It redirects search-engine visitors to
+    attacker sites while hiding the redirect from logged-in admins.
+
+    The sentinel variable names (ndsw, ndsx, ndsy, ndsz) are unique to this
+    campaign — false positives are essentially impossible.
+    """
+    findings: list[dict] = []
+    m = re.search(
+        r'if\s*\(\s*nds[wxyz]\s*===\s*undefined\s*\)',
+        js, re.IGNORECASE,
+    )
+    if not m:
+        return findings
+    findings.append({
+        'severity': 'CRITICAL',
+        'category': 'JavaScript',
+        'title': 'NDSW/NDSX WordPress malware injection (Balada Injector family)',
+        'description': (
+            'The NDSW/NDSX malware sentinel variable check was found — a campaign-unique '
+            'identifier with no legitimate use. This is one of the most active WordPress '
+            'compromise vectors: 43,000+ detections in H1 2024 (Sucuri). The malware '
+            'checks if a global variable (ndsw, ndsx, ndsy, ndsz) is undefined, then '
+            'executes its payload via a PHP proxy that dynamically serves the injection. '
+            'Visitors arriving from search engines are redirected to attacker-controlled '
+            'sites; logged-in admins see clean content. The site is compromised — the '
+            'full WordPress installation and all plugins require immediate auditing.'
+        ),
+        'evidence': f'[NDSW sentinel check]\n{_snippet(js, m)}',
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# REC-05 — Checkout-page skimmer activation gate
+# ---------------------------------------------------------------------------
+
+def _check_skimmer_activation_gate(js: str) -> list[dict]:
+    """
+    Detect Magecart checkout-page activation gates.
+
+    Modern skimmers restrict execution to checkout pages to evade scanners that
+    only analyse the homepage.  The activation gate itself is present in the
+    static source — revealing the skimmer's existence even when the scanner
+    does not visit the checkout page.
+
+    Requires: URL-check pattern (location.href.includes('checkout')) in proximity
+    to either a card-field DOM selector or an outbound exfiltration call.
+    """
+    findings: list[dict] = []
+
+    gate_re = re.compile(
+        r'(?:location\.href|location\.pathname|document\.URL|window\.location\b)'
+        r'\s*\.(?:includes|indexOf|match|search)\s*\(\s*["\']'
+        r'(?:checkout|payment|billing|order|purchase|cart)["\']',
+        re.IGNORECASE,
+    )
+    m = gate_re.search(js)
+    if not m:
+        return findings
+
+    _PROXIMITY = 3000
+    region = js[max(0, m.start() - _PROXIMITY): min(len(js), m.end() + _PROXIMITY)]
+
+    card_field_re = re.compile(
+        r'(?:querySelector(?:All)?|getElementById|getElementsByName|name\s*[=:]\s*["\'])'
+        r'[^;]{0,80}'
+        r'(?:card[-_]?(?:number|num|holder|no\b)|cvv|cvc|cv2|ccv|expir|pan\b|cc[-_]?num)',
+        re.IGNORECASE,
+    )
+    exfil_re = re.compile(
+        r'(?:fetch\s*\(|sendBeacon\s*\(|new\s+XMLHttpRequest|new\s+Image\s*\(\s*\))',
+        re.IGNORECASE,
+    )
+
+    if not (card_field_re.search(region) or exfil_re.search(region)):
+        return findings
+
+    findings.append({
+        'severity': 'HIGH',
+        'category': 'JavaScript',
+        'title': 'Checkout-page skimmer activation gate',
+        'description': (
+            'A script checks the current URL for a payment/checkout context before executing, '
+            'in proximity to card-field selectors or outbound network calls. '
+            'This is the activation gate pattern used by modern Magecart skimmers to restrict '
+            'execution to checkout pages — evading scanners that only analyse the homepage. '
+            'The skimmer code is present in the source even though its payload fires only '
+            'on the checkout page. The merchant site requires immediate investigation.'
+        ),
+        'evidence': f'[Activation gate]\n{_snippet(js, m)}',
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# REC-06 — MutationObserver-based payment skimmer
+# ---------------------------------------------------------------------------
+
+def _check_mutation_observer_skimmer(js: str) -> list[dict]:
+    """
+    Detect MutationObserver-based payment skimmers.
+
+    Modern Magecart skimmers register a MutationObserver to defer card capture
+    until payment elements appear in the DOM.  The existing _check_payment_skimmer
+    requires an explicit querySelector card-field call; this check catches the
+    variant where the observer iterates e.addedNodes / e.target without an
+    explicit querySelector, making it invisible to the primary skimmer check.
+
+    Fires when MutationObserver + card-field keywords + exfiltration appear in
+    proximity — regardless of whether querySelector is present.
+    """
+    findings: list[dict] = []
+
+    mo_re = re.compile(r'new\s+MutationObserver\s*\(', re.IGNORECASE)
+    m = mo_re.search(js)
+    if not m:
+        return findings
+
+    _PROXIMITY = 3000
+    region = js[max(0, m.start() - _PROXIMITY): min(len(js), m.end() + _PROXIMITY)]
+
+    card_re = re.compile(
+        r'card[-_\s]?(?:number|num|holder|name|no\b)|'
+        r'cvv|cvc|cv2|ccv|security[-_\s]?code|expir|pan\b|cc[-_]?num|'
+        r'credit[-_\s]?card',
+        re.IGNORECASE,
+    )
+    exfil_re = re.compile(
+        r'(?:fetch\s*\(|sendBeacon\s*\(|new\s+XMLHttpRequest|new\s+Image\s*\(\s*\)|\.send\s*\()',
+        re.IGNORECASE,
+    )
+
+    if not (card_re.search(region) and exfil_re.search(region)):
+        return findings
+
+    # Avoid double-reporting if _check_payment_skimmer already fires — it also
+    # checks for MutationObserver as a corroborating signal.
+    # This check covers the non-querySelector variant; if querySelector IS present
+    # the primary skimmer check will produce a CRITICAL, so only emit HIGH here
+    # if no explicit card DOM query is in the region.
+    dom_query_re = re.compile(
+        r'querySelector(?:All)?\s*\(\s*["\'][^"\']*'
+        r'(?:card|cvv|cvc|expir|pan\b|cc[-_]?num)',
+        re.IGNORECASE,
+    )
+    if dom_query_re.search(region):
+        return findings  # _check_payment_skimmer will cover this more precisely
+
+    findings.append({
+        'severity': 'HIGH',
+        'category': 'JavaScript',
+        'title': 'MutationObserver-based payment skimmer',
+        'description': (
+            'A MutationObserver registration was found in proximity to payment card keywords '
+            'and an outbound exfiltration call. Modern Magecart skimmers defer card capture '
+            'until payment elements appear in the DOM via MutationObserver, avoiding detection '
+            'by scanners that only analyse page-load behaviour. This pattern was documented '
+            'by Malwarebytes Labs and SecurityMetrics as a primary evasion technique in 2025.'
+        ),
+        'evidence': f'[MutationObserver registration]\n{_snippet(js, m)}',
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# REC-07 — Blob-URI iframe injection (GhostFrame phishing technique)
+# ---------------------------------------------------------------------------
+
+def _check_blob_iframe_injection(js: str) -> list[dict]:
+    """
+    Detect blob-URI iframe injection (GhostFrame phishing, PhishFort 2025-2026).
+
+    GhostFrame constructs a Blob from HTML content containing a phishing form,
+    creates an object URL, and assigns it to an iframe's src.  This bypasses CSP
+    frame-src directives (blob: is treated as same-origin) and defeats static HTML
+    form analysis (the form is inside the blob, not in page source).
+
+    Distinct from _check_html_smuggling which requires a .download trigger —
+    this uses iframe.src instead of a forced file download.
+    """
+    findings: list[dict] = []
+
+    blob_m = re.search(r'new\s+Blob\s*\(\s*\[', js, re.IGNORECASE)
+    if not blob_m:
+        return findings
+
+    _PROXIMITY = 2500
+    blob_pos = blob_m.start()
+    search_window = js[max(0, blob_pos - _PROXIMITY): min(len(js), blob_pos + _PROXIMITY)]
+
+    obj_url_m = re.search(r'URL\.createObjectURL\s*\(', search_window, re.IGNORECASE)
+    if not obj_url_m:
+        return findings
+
+    obj_url_abs = max(0, blob_pos - _PROXIMITY) + obj_url_m.start()
+    trigger_window = js[max(0, obj_url_abs - _PROXIMITY): min(len(js), obj_url_abs + _PROXIMITY)]
+
+    # iframe src assignment — various notations
+    iframe_m = re.search(
+        r'(?:iframe|frame)\b[^;]{0,100}\.src\s*='
+        r'|(?:iframe|frame)\b[^;]{0,100}\.setAttribute\s*\(\s*["\']src["\']'
+        r'|\.src\s*=\s*(?:blobUrl|objectUrl|blobURL|objectURL)',
+        trigger_window, re.IGNORECASE,
+    )
+    if not iframe_m:
+        return findings
+
+    # Skip if this is already caught as HTML smuggling (.download is present)
+    if re.search(r'\.download\s*=', trigger_window, re.IGNORECASE):
+        return findings
+
+    findings.append({
+        'severity': 'HIGH',
+        'category': 'JavaScript',
+        'title': 'Blob-URI iframe injection — GhostFrame phishing technique',
+        'description': (
+            'Script constructs a Blob from HTML, creates an object URL, and assigns it to an '
+            'iframe src. The GhostFrame technique (PhishFort, 2025) uses this to deliver a '
+            'phishing form inside a blob:-URI iframe, bypassing CSP frame-src directives '
+            'because blob: URLs are treated as same-origin. The phishing form is invisible to '
+            'static HTML analysis. Combined with a brand-matching domain or login form, '
+            'this is a strong phishing indicator.'
+        ),
+        'evidence': (
+            f'[Blob construction]\n{_snippet(js, blob_m)}\n\n'
+            f'[Object URL creation]\n{_snippet(js, obj_url_m)}'
+        ),
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# REC-13 — Smart-contract-backed skimmer (JScrambler, 2025)
+# ---------------------------------------------------------------------------
+
+def _check_web3_skimmer_storage(js: str) -> list[dict]:
+    """
+    Detect Magecart skimmers that store the exfiltration endpoint in a blockchain
+    smart contract (JScrambler research, 2025).
+
+    The skimmer uses web3.js / ethers.js to read a URL from a Binance Smart Chain
+    contract via eth_call, then exfiltrates stolen card data to that URL.  The C2
+    URL is takedown-resistant — it cannot be removed once deployed to the chain.
+
+    Distinct from _check_wallet_drainer (which requires eth_sendTransaction /
+    signature requests) — this is a READ operation to retrieve C2 infrastructure.
+    """
+    findings: list[dict] = []
+
+    web3_re = re.compile(
+        r'ethers\.Contract|new\s+Web3\s*\(|web3\.eth\.|'
+        r'\beth_call\b|\.methods\b[^;]{0,40}\.\s*call\s*\(',
+        re.IGNORECASE,
+    )
+    m = web3_re.search(js)
+    if not m:
+        return findings
+
+    # Skip — wallet drainer check already covers transaction-signing variants
+    if re.search(r'eth_sendTransaction|eth_signTypedData|personal_sign', js, re.IGNORECASE):
+        return findings
+
+    _PROXIMITY = 4000
+    region = js[max(0, m.start() - _PROXIMITY): min(len(js), m.end() + _PROXIMITY)]
+
+    card_re = re.compile(
+        r'card[-_\s]?(?:number|num|holder)|cvv\b|cvc\b|expir|pan\b|cc[-_]?num|'
+        r'querySelector[^;]{0,80}(?:card|cvv|expir)',
+        re.IGNORECASE,
+    )
+    if not card_re.search(region):
+        return findings
+
+    findings.append({
+        'severity': 'HIGH',
+        'category': 'JavaScript',
+        'title': 'Smart-contract-backed skimmer infrastructure',
+        'description': (
+            'Web3 contract access (ethers.js, web3.js, or eth_call) was found in proximity '
+            'to payment card field keywords. A Magecart campaign documented by JScrambler (2025) '
+            'stores its exfiltration URL inside a Binance Smart Chain contract — making the '
+            'C2 infrastructure takedown-resistant once deployed. This pattern indicates a '
+            'sophisticated persistent skimmer. Checkout-page analysis and server-side audit required.'
+        ),
+        'evidence': f'[Smart contract access near payment context]\n{_snippet(js, m)}',
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# REC-14 — WebAssembly-based code obfuscation (Wobfuscator, NDSS 2026)
+# ---------------------------------------------------------------------------
+
+def _check_wasm_obfuscation(js: str) -> list[dict]:
+    """
+    Detect WebAssembly instantiation near sensitive browser operations.
+
+    Wobfuscator (NDSS 2026) and similar tools transpile JavaScript logic into
+    WebAssembly to evade static analysis.  Legitimate WASM uses (game engines,
+    image processing, crypto libraries) do not appear near card-field selectors,
+    eval(), cookie writes, or clipboard operations.
+
+    Fires MEDIUM when WASM instantiation appears in proximity to suspicious
+    browser APIs — a combination that has no legitimate explanation.
+    """
+    findings: list[dict] = []
+
+    wasm_re = re.compile(
+        r'WebAssembly\.(?:instantiate|compile|instantiateStreaming)\s*\(',
+        re.IGNORECASE,
+    )
+    m = wasm_re.search(js)
+    if not m:
+        return findings
+
+    _PROXIMITY = 3000
+    region = js[max(0, m.start() - _PROXIMITY): min(len(js), m.end() + _PROXIMITY)]
+
+    suspicious_re = re.compile(
+        r'eval\s*\(|card[-_\s]?(?:number|num|holder)|cvv\b|cvc\b|'
+        r'document\.cookie|sendBeacon|navigator\.clipboard',
+        re.IGNORECASE,
+    )
+    if not suspicious_re.search(region):
+        return findings
+
+    findings.append({
+        'severity': 'MEDIUM',
+        'category': 'JavaScript',
+        'title': 'WebAssembly instantiation near sensitive operations',
+        'description': (
+            'WebAssembly.instantiate() or compile() was found in proximity to payment card '
+            'fields, eval(), cookie access, or clipboard operations. Wobfuscator (NDSS 2026) '
+            'and similar tools transpile malicious JavaScript logic into WASM to evade static '
+            'analysis — the binary contains the actual payload and cannot be read without '
+            'decompilation. This combination warrants manual analysis of the WASM binary.'
+        ),
+        'evidence': f'[WebAssembly instantiation]\n{_snippet(js, m)}',
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -2291,6 +2774,15 @@ def analyse_js(js_content: str, source_url: str = '', beautify: bool = True) -> 
         add_findings(_check_dynamic_import_external(js))
         add_findings(_check_xor_string_array_obfuscation(js))
         add_findings(_check_tds_fingerprint_redirect(js))
+        # P0 / P1 new checks (2026-04 detection review)
+        add_findings(_check_jsfuck_obfuscation(js))
+        add_findings(_check_jjencode_obfuscation(js))
+        add_findings(_check_ndsw_injection(js))
+        add_findings(_check_skimmer_activation_gate(js))
+        add_findings(_check_mutation_observer_skimmer(js))
+        add_findings(_check_blob_iframe_injection(js))
+        add_findings(_check_web3_skimmer_storage(js))
+        add_findings(_check_wasm_obfuscation(js))
 
     # Sort by severity
     findings.sort(key=_sev_key)
