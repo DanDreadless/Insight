@@ -1494,11 +1494,14 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
         re.IGNORECASE,
     )
 
-    # Scan 2KB before the execCommand call — the payload is typically assigned
-    # to a textarea.value or element.textContent in the lines just before the copy
-    region = js[max(0, m.start() - 2000): m.end() + 200]
-
-    shell_m = _SHELL_CMD_RE.search(region)
+    # Scan the entire script for a shell payload — ClickFix pages vary widely in
+    # how close the command string is to the execCommand call.  On compact pages
+    # the assignment is a few lines above; on pages with more scaffolding (event
+    # listener setup, DOM manipulation) the command variable can be defined
+    # hundreds or thousands of chars away.  Searching the whole script is safe:
+    # the co-occurrence of execCommand('copy') and a shell command in the same
+    # script blob is already a very strong signal.
+    shell_m = _SHELL_CMD_RE.search(js)
     if shell_m:
         findings.append({
             'severity': 'CRITICAL',

@@ -216,6 +216,8 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
     has_clipboard_write = (
         _has_title_fragment('clipboard write outside')
         or _has_title_fragment('clipboard hijack')
+        or _has_title_fragment('execcommand')       # legacy execCommand('copy') ClickFix
+        or _has_title_fragment('clickfix clipboard') # both modern and legacy named payloads
     )
     if has_fake_captcha and has_clipboard_write:
         if not any(f.get('title') == 'Context collapse: ClickFix malware delivery' for f in findings):
