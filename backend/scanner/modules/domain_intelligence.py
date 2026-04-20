@@ -2,6 +2,7 @@
 Domain-level threat intelligence module.
 All detection is content/heuristic-based — no external threat intel APIs.
 """
+import ipaddress
 import math
 import re
 import unicodedata
@@ -237,6 +238,15 @@ def analyse_domain(url: str, whois_data: dict | None = None) -> list[dict]:
 
     if not sld:
         return findings
+
+    # Bare IP addresses have no SLD/TLD in the domain sense — skip all
+    # domain-heuristic checks (DGA, typosquat, brand, TLD risk) since they
+    # would produce nonsensical results (e.g. digits scoring as high-consonant DGA).
+    try:
+        ipaddress.ip_address(hostname)
+        return findings
+    except ValueError:
+        pass
 
     # ------------------------------------------------------------------
     # 1. High-risk TLD

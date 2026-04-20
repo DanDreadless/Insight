@@ -250,6 +250,74 @@ def _is_external(url: str, page_url: str) -> bool:
     return bool(target_dom) and target_dom != page_dom
 
 
+_OPEN_DIR_TITLE_RE = re.compile(r'<title>\s*Index of\s+/', re.IGNORECASE)
+_OPEN_DIR_H1_RE = re.compile(r'<h1>\s*Index of\s+/', re.IGNORECASE)
+_OPEN_DIR_PARENT_RE = re.compile(r'Parent Directory', re.IGNORECASE)
+_OPEN_DIR_SERVER_RE = re.compile(r'<address>(?:Apache|nginx|lighttpd|IIS)[^<]{0,80}</address>', re.IGNORECASE)
+_OPEN_DIR_SORT_RE = re.compile(r'[?&][CO]=[NDMS]&(?:amp;)?[CO]=[AD]', re.IGNORECASE)
+
+
+def _check_open_directory(html: str, soup) -> list[dict]:
+    """Detect Apache/Nginx open directory listings — exposes server file structure."""
+    has_index_title = bool(_OPEN_DIR_TITLE_RE.search(html))
+    has_index_h1 = bool(_OPEN_DIR_H1_RE.search(html))
+    has_parent_dir = bool(_OPEN_DIR_PARENT_RE.search(html))
+    has_server_sig = bool(_OPEN_DIR_SERVER_RE.search(html))
+    has_sort_links = bool(_OPEN_DIR_SORT_RE.search(html))
+
+    # Require at least two structural signals to fire — avoids matching pages that
+    # merely mention "Index of" in body copy.
+    signal_count = sum([has_index_title, has_index_h1, has_parent_dir, has_server_sig, has_sort_links])
+    if signal_count < 2:
+        return []
+
+    # Try to extract a short sample of listed filenames for the evidence block
+    file_links = []
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        # Skip navigation links (sorting params, parent dir)
+        if href.startswith('?') or href == '../':
+            continue
+        text = a.get_text(strip=True)
+        if text and len(text) < 80:
+            file_links.append(text)
+        if len(file_links) >= 8:
+            break
+
+    signals = []
+    if has_index_title:
+        signals.append('<title>Index of /…</title> present')
+    if has_index_h1:
+        signals.append('<h1>Index of /…</h1> present')
+    if has_parent_dir:
+        signals.append('"Parent Directory" link present')
+    if has_server_sig:
+        m = _OPEN_DIR_SERVER_RE.search(html)
+        signals.append(f'Server signature: {m.group(0)[:80]}')
+    if has_sort_links:
+        signals.append('Column-sort query parameters present (?C=N&O=D)')
+
+    evidence = '[Structural signals]\n' + '\n'.join(f'  {s}' for s in signals)
+    if file_links:
+        evidence += '\n\n[Sample listed entries]\n' + '\n'.join(f'  {f}' for f in file_links)
+
+    return [{
+        'severity': 'MEDIUM',
+        'category': 'HTML',
+        'title': 'Open directory listing — server file structure exposed',
+        'description': (
+            'The server is returning an auto-generated directory index (Apache/Nginx "Index of /") '
+            'rather than a web page. This misconfiguration exposes the full file and directory '
+            'tree to any visitor, revealing application structure, backup files, configuration '
+            'files, log files, and other sensitive assets. Attackers routinely search for open '
+            'directories to harvest credentials, source code, and database dumps. Legitimate '
+            'sites serving intentional file listings (e.g., software mirrors) are expected '
+            'to use explicit index pages rather than auto-generated listings.'
+        ),
+        'evidence': evidence,
+    }]
+
+
 def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
     """
     Analyse HTML content for security issues.
@@ -916,6 +984,11 @@ def analyse_html(html: str, page_url: str, resources: dict) -> list[dict]:
     # 19. Shell commands in HTML attributes / hidden elements (ClickFix payload storage)
     # ------------------------------------------------------------------
     findings.extend(_check_shell_commands_in_html(soup))
+
+    # ------------------------------------------------------------------
+    # 22. Open directory listing (Apache/Nginx auto-generated index)
+    # ------------------------------------------------------------------
+    findings.extend(_check_open_directory(html, soup))
 
     # ------------------------------------------------------------------
     # 21. Crypto wallet brand impersonation (SEO poisoning / fake wallet sites)
