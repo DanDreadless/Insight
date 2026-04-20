@@ -976,12 +976,16 @@ def _check_hidden_iframe_injection(js: str, source_url: str = '') -> list[dict]:
     if not iframe_m:
         return findings
 
+    # Only look for hidden styling within 800 chars of the iframe creation.
+    # Searching the entire script catches unrelated elements (e.g. viewport
+    # measurement divs with width:0) that have nothing to do with the iframe.
+    iframe_window = js[max(0, iframe_m.start() - 200): min(len(js), iframe_m.end() + 800)]
     hidden_m = re.search(
         r'(?:display\s*(?:=|:)\s*["\']?none|'
         r'visibility\s*(?:=|:)\s*["\']?hidden|'
         r'width\s*(?:=|:)\s*["\']?0|'
         r'height\s*(?:=|:)\s*["\']?0)',
-        js, re.IGNORECASE
+        iframe_window, re.IGNORECASE
     )
     if hidden_m:
         findings.append({
@@ -995,7 +999,7 @@ def _check_hidden_iframe_injection(js: str, source_url: str = '') -> list[dict]:
             ),
             'evidence': (
                 f'[Iframe created dynamically]\n{_snippet(js, iframe_m)}\n\n'
-                f'[Hidden styling applied]\n{_snippet(js, hidden_m)}'
+                f'[Hidden styling applied]\n{_snippet(iframe_window, hidden_m)}'
             ),
         })
     return findings
@@ -1697,6 +1701,16 @@ def _check_dom_script_injection(js: str, source_url: str = '') -> list[dict]:
             continue
 
         injected_src = _extract_injected_script_src(forward_window)
+
+        # Variable URL — the forward window didn't contain the assignment.
+        # Try the backward window (1000 chars before the createElement call):
+        # video player libraries (YouTube/Vimeo API loaders) typically assign
+        # the URL before the createElement call, not after.
+        if injected_src and injected_src.startswith('<variable'):
+            backward_window = js[max(0, m.start() - 1000): m.start()]
+            injected_src_back = _extract_injected_script_src(backward_window + forward_window)
+            if injected_src_back and not injected_src_back.startswith('<variable'):
+                injected_src = injected_src_back
 
         # Webpack file: only fire if we have an explicit external https:// URL
         # that is not a known-good domain.  Variable URLs inside webpack bundles
