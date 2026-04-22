@@ -464,5 +464,40 @@ def context_collapse_check(all_findings: list[dict]) -> list[dict]:
                 'evidence': evidence_block,
             })
 
+    # Context 12: Redirect cloaking + cross-domain credential harvesting
+    # A cloaking redirect combined with a credential-harvesting form is an
+    # unambiguous phishing delivery chain. No legitimate website uses redirect
+    # cloaking (serving a different page to scanners vs real visitors) AND submits
+    # login forms to a separate attacker-controlled domain. The combination
+    # confirms both evasion intent and credential collection in a single scan.
+    has_redirect_cloaking = _has_title_fragment('suspicious http redirect') or _has_title_fragment('redirect to unrelated domain')
+    if has_redirect_cloaking and has_external_form:
+        if not any(f.get('title') == 'Context collapse: cloaked credential harvesting phishing' for f in findings):
+            trigger_parts: list[str] = []
+            for f in findings:
+                title = f.get('title', '').lower()
+                if any(kw in title for kw in ('redirect', 'form submits')):
+                    label = f.get('title', '')
+                    ev = f.get('evidence', '').strip()
+                    trigger_parts.append(f'[{label}]\n{ev}' if ev else f'[{label}]')
+            evidence_block = '\n\n'.join(trigger_parts) if trigger_parts else (
+                'Redirect cloaking + cross-domain credential harvesting form detected'
+            )
+            synthetic.append({
+                'severity': 'CRITICAL',
+                'category': 'Threat',
+                'title': 'Context collapse: cloaked credential harvesting phishing',
+                'description': (
+                    'Two converging signals confirm an active phishing delivery chain: '
+                    'a cloaking redirect (the submitted URL redirects to a completely different '
+                    'domain — a well-known technique to show clean pages to scanners while '
+                    'serving phishing content to real visitors) combined with a form that '
+                    'submits credentials to an external attacker-controlled domain. '
+                    'No legitimate website uses redirect cloaking AND cross-domain credential '
+                    'collection simultaneously. This is a confirmed credential harvesting attack.'
+                ),
+                'evidence': evidence_block,
+            })
+
     findings.extend(synthetic)
     return findings

@@ -241,7 +241,8 @@ def _path_extension(href: str) -> str:
 
 def _registrable_domain(url: str) -> str:
     ext = tldextract.extract(url)
-    return f'{ext.domain}.{ext.suffix}' if ext.suffix else ext.domain
+    result = f'{ext.domain}.{ext.suffix}' if ext.suffix else ext.domain
+    return result.lower()
 
 
 def _is_external(url: str, page_url: str) -> bool:
