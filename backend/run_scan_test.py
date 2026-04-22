@@ -12,6 +12,7 @@ If URL is omitted in single mode, TARGET_URL below is used.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import warnings
@@ -99,9 +100,10 @@ JS_WORKERS              = 8             # parallel script fetches
 JS_FETCH_TIMEOUT        = (5, 6)        # (connect, read) seconds per script
 JS_PHASE_TIMEOUT        = 60            # hard wall-clock cap for entire JS fetch phase (seconds)
 JS_MAX_SCRIPTS          = 50            # max external scripts to analyse
-JS_MAX_BYTES            = 50 * 1024     # 50 KB per script (download cap — we only analyse 20KB anyway)
-JS_DOWNLOAD_HARD_TIMEOUT = 8            # total wall-clock seconds for any single download
-JS_SKIP_ABOVE_BYTES     = 150 * 1024   # skip scripts >150KB
+JS_MAX_BYTES            = 512 * 1024    # 512 KB per script — matches production scanner which allows 1 MB;
+                                        # attackers inject payloads mid-file (not just prepend/append)
+JS_DOWNLOAD_HARD_TIMEOUT = 12           # increase to match larger download cap
+JS_SKIP_ABOVE_BYTES     = 600 * 1024   # skip scripts >600KB
 
 HEADERS = {
     'User-Agent': (
@@ -168,14 +170,28 @@ def fetch_and_analyse_script(url):
     size_kb = len(js_text) // 1024
 
     # Analyse first 10KB + last 10KB only.
-    # Injected malware is a compact blob always prepended/appended to the
-    # legitimate file — 10KB from each end is more than enough to catch it.
-    # Keeping the sample small is critical: jsbeautifier is CPU-bound and
-    # Python's GIL serialises it across all worker threads, so large samples
-    # cause the entire JS phase to stall.
+    # Injected malware is a compact blob prepended/appended to the legitimate
+    # file in most campaigns. Keeping the sample small is critical: jsbeautifier
+    # is CPU-bound and Python's GIL serialises it across all worker threads.
+    # Exception: when critical-payload indicators (clipboard write, execCommand,
+    # eval(atob)) are detected in the middle of the file, a 3KB window around
+    # each match is appended to ensure parity with the production scanner, which
+    # passes the full file to js_analyser.analyse_js() with no sampling.
     EDGE = 10 * 1024
     if len(js_text) > EDGE * 2:
         js_sample = js_text[:EDGE] + '\n' + js_text[-EDGE:]
+        _CRITICAL_INDICATOR_RE = re.compile(
+            r'navigator\.clipboard\.writeText'
+            r'|document\.execCommand\s*\(\s*["\']copy["\']'
+            r'|eval\s*\(\s*(?:atob|unescape)\s*\(',
+            re.IGNORECASE,
+        )
+        MID_WIN = 3 * 1024
+        for m in _CRITICAL_INDICATOR_RE.finditer(js_text):
+            if EDGE <= m.start() <= len(js_text) - EDGE:
+                win_start = max(0, m.start() - MID_WIN // 2)
+                win_end = min(len(js_text), m.start() + MID_WIN)
+                js_sample += '\n' + js_text[win_start:win_end]
     else:
         js_sample = js_text
 

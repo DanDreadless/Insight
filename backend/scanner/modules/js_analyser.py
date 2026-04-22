@@ -1543,14 +1543,31 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
     return findings
 
 
-def _check_document_write_external_script(js: str) -> list[dict]:
+def _check_document_write_external_script(js: str, source_url: str = '') -> list[dict]:
     findings: list[dict] = []
     pattern = re.compile(
-        r'document\.write\s*\([^)]*<script\s+src\s*=\s*["\']https?://',
+        r'document\.write\s*\([^)]*<script\s+src\s*=\s*["\']'
+        r'(https?://[^\s"\'<>]{1,256})',
         re.IGNORECASE | re.DOTALL,
     )
-    matches = pattern.findall(js)
-    if matches:
+    source_host = ''
+    if source_url:
+        m = re.match(r'https?://([^/?#]+)', source_url)
+        if m:
+            source_host = m.group(1).lower()
+
+    external_urls = []
+    for injected_url in dict.fromkeys(pattern.findall(js)):
+        injected_host_m = re.match(r'https?://([^/?#]+)', injected_url)
+        if not injected_host_m:
+            continue
+        injected_host = injected_host_m.group(1).lower()
+        if source_host and injected_host == source_host:
+            continue  # same-domain — not a threat
+        external_urls.append(injected_url)
+
+    if external_urls:
+        injected_urls = '\n'.join(f'  {u}' for u in external_urls[:5])
         findings.append({
             'severity': 'HIGH',
             'category': 'JavaScript',
@@ -1559,7 +1576,7 @@ def _check_document_write_external_script(js: str) -> list[dict]:
                 'Script uses document.write() to inject an external script tag. '
                 'This bypasses CSP and SRI protections and can introduce attacker-controlled code.'
             ),
-            'evidence': matches[0],
+            'evidence': f'Injected script URL(s):\n{injected_urls}',
         })
     return findings
 
@@ -2884,7 +2901,7 @@ def analyse_js(js_content: str, source_url: str = '', beautify: bool = True) -> 
         add_findings(_check_sendbeacon_external(js, source_url))
         add_findings(_check_clipboard_hijacking(js))
         add_findings(_check_execcommand_clipboard(js))
-        add_findings(_check_document_write_external_script(js))
+        add_findings(_check_document_write_external_script(js, source_url))
         add_findings(_check_dom_script_injection(js, source_url))
         add_findings(_check_shell_dropper(js))
         add_findings(_check_html_smuggling(js))
