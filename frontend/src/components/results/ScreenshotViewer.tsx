@@ -7,7 +7,19 @@ interface Props {
 export default function ScreenshotViewer({ screenshotB64 }: Props) {
   const [open, setOpen] = useState(false)
 
-  if (!screenshotB64) return null
+  if (!screenshotB64) {
+    return (
+      <div
+        className="rounded-lg mb-4 px-4 py-3 flex items-center gap-3"
+        style={{ backgroundColor: '#2a3238', border: '1px solid rgba(255,255,255,0.06)' }}
+      >
+        <span className="text-sm font-semibold text-white/70">Visual Screenshot</span>
+        <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>
+          — unavailable (page may require external resources to render)
+        </span>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -33,7 +45,7 @@ export default function ScreenshotViewer({ screenshotB64 }: Props) {
       {open && (
         <div className="border-t px-4 pb-4 pt-3" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
           <p className="text-xs mb-3" style={{ color: 'rgba(255,255,255,0.35)' }}>
-            Rendered via Carapace — Chromium headless, JavaScript disabled, network access blocked.
+            Rendered via Carapace — Chromium headless, JavaScript enabled, network access isolated.
           </p>
           <img
             src={`data:image/png;base64,${screenshotB64}`}

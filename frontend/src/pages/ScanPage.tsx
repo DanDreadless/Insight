@@ -398,9 +398,14 @@ export default function ScanPage() {
 
   // Complete
   const SEVERITY_RANK: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 }
-  const findings = [...(scan.findings ?? [])].sort(
-    (a, b) => (SEVERITY_RANK[a.severity] ?? 4) - (SEVERITY_RANK[b.severity] ?? 4)
-  )
+  const findings = [...(scan.findings ?? [])].sort((a, b) => {
+    const sevDiff = (SEVERITY_RANK[a.severity] ?? 4) - (SEVERITY_RANK[b.severity] ?? 4)
+    if (sevDiff !== 0) return sevDiff
+    const aThreat = a.category === 'Threat' ? 0 : 1
+    const bThreat = b.category === 'Threat' ? 0 : 1
+    if (aThreat !== bThreat) return aThreat - bThreat
+    return (a.category ?? '').localeCompare(b.category ?? '') || (a.title ?? '').localeCompare(b.title ?? '')
+  })
   const criticalAndHigh = findings.filter((f) => f.severity === 'CRITICAL' || f.severity === 'HIGH')
   const mediumAndLow = findings.filter((f) => f.severity === 'MEDIUM' || f.severity === 'LOW')
   const infoFindings = findings.filter((f) => f.severity === 'INFO')
@@ -425,10 +430,10 @@ export default function ScanPage() {
       {/* Verdict banner */}
       <VerdictBanner verdict={scan.verdict} url={scan.url} scanTime={scanTime} />
 
-      {/* Screenshot */}
-      {!!scan.scan_metadata?.screenshot_b64 && (
+      {/* Screenshot — always render; component shows "unavailable" when b64 is empty */}
+      {scan.scan_metadata !== undefined && (
         <ScreenshotViewer
-          screenshotB64={scan.scan_metadata.screenshot_b64 as string}
+          screenshotB64={(scan.scan_metadata.screenshot_b64 as string) ?? ''}
         />
       )}
 

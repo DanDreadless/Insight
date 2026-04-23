@@ -18,6 +18,7 @@ Configuration (via environment variables):
     CARAPACE_API_KEY           — optional API key sent in X-API-Key header.
     CARAPACE_SCREENSHOT_TIMEOUT — per-request timeout in seconds (default 30).
 """
+import base64
 import logging
 import os
 
@@ -396,8 +397,21 @@ def capture_screenshot(url: str, width: int = 1280, height: int = 1400) -> dict 
         resp.raise_for_status()
         data = resp.json()
         threat = data.get('threat_report', {})
+
+        # Blank screenshot detection: a solid-white or near-blank 1280×1400 PNG
+        # compresses to under ~20 KB.  Discard it so the frontend shows
+        # "unavailable" rather than a misleading white image.
+        raw_ss = data.get('output') or ''
+        if raw_ss:
+            try:
+                if len(base64.b64decode(raw_ss)) < 20_000:
+                    logger.info('Carapace screenshot discarded — likely blank render')
+                    raw_ss = ''
+            except Exception:
+                raw_ss = ''
+
         return {
-            'screenshot_b64':       data.get('output') or '',
+            'screenshot_b64':       raw_ss,
             'carapace_risk':        threat.get('risk_score', 0),
             'carapace_flags':       threat.get('flags', []),
             'carapace_tech':        threat.get('tech_stack', []),

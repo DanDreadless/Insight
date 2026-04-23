@@ -490,12 +490,27 @@ def run_scan(self, scan_job_id: str) -> dict:
             cached_job.last_scanned_at = now
             cached_job.save(update_fields=['last_scanned_at'])
 
+            # If the canonical job never got a screenshot (blank render or Carapace
+            # was unavailable at the time), attempt a fresh capture now rather than
+            # perpetuating the missing screenshot across every subsequent cache hit.
+            merged_metadata = cached_job.scan_metadata
+            if not merged_metadata.get('screenshot_b64'):
+                try:
+                    from scanner.modules.carapace_client import capture_screenshot
+                    _fresh = capture_screenshot(final_url)
+                    if _fresh and _fresh.get('screenshot_b64'):
+                        merged_metadata = dict(merged_metadata)
+                        merged_metadata['screenshot_b64'] = _fresh['screenshot_b64']
+                        logger.info('[scan:%s] Fresh screenshot captured for cached result', scan_job_id)
+                except Exception as _ss_err:
+                    logger.warning('[scan:%s] Fresh screenshot attempt failed: %s', scan_job_id, _ss_err)
+
             job.status = ScanJob.Status.COMPLETE
             job.verdict = cached_job.verdict
             job.completed_at = now
             job.last_scanned_at = now
             job.content_hash = content_hash
-            job.scan_metadata = cached_job.scan_metadata
+            job.scan_metadata = merged_metadata
             job.cached_from = cached_job
             job.error_message = ''
             job.detection_engine_version = current_engine_version
