@@ -40,11 +40,12 @@ def derive_verdict(findings: list[dict]) -> str:
 
 
 def sort_findings(findings: list[dict]) -> list[dict]:
-    """Sort findings by severity order, then by category alphabetically."""
+    """Sort findings: severity first, then Threat category before others, then alphabetically."""
     return sorted(
         findings,
         key=lambda f: (
             SEVERITY_ORDER.get(f.get('severity', 'INFO'), 4),
+            0 if f.get('category') == 'Threat' else 1,  # context-collapse synthetics first
             f.get('category', ''),
             f.get('title', ''),
         ),

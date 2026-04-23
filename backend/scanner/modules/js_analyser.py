@@ -1339,21 +1339,30 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
         re.IGNORECASE,
     )
 
-    # Try literal string argument first (most reliable)
+    # Try literal string argument first (most reliable).
+    # The pattern handles escape sequences (\") within the string so that payloads
+    # like writeText("powershell ... \"reg add ...\"") are captured in full rather
+    # than truncated at the first escaped quote.
     write_arg_m = re.search(
-        r'navigator\.clipboard\.writeText\s*\(\s*["\']([^"\']{10,})["\']',
+        r'navigator\.clipboard\.writeText\s*\(\s*'
+        r'(?:"((?:[^"\\]|\\.){10,})"'
+        r"|'((?:[^'\\]|\\.){10,})')",
         js, re.IGNORECASE,
+    )
+    # Normalise: group(1) = double-quoted match, group(2) = single-quoted match
+    write_arg_text: str | None = (
+        (write_arg_m.group(1) or write_arg_m.group(2)) if write_arg_m else None
     )
     # Also scan 2KB around the call for shell-command strings — covers variable pattern
     call_region = js[max(0, m.start() - 500):min(len(js), m.end() + 1500)]
 
-    shell_in_arg = bool(write_arg_m and _SHELL_CMD_RE.search(write_arg_m.group(1)))
+    shell_in_arg = bool(write_arg_text and _SHELL_CMD_RE.search(write_arg_text))
     shell_in_region = bool(_SHELL_CMD_RE.search(call_region))
 
     if shell_in_arg or shell_in_region:
         payload_evidence = (
-            f'[Clipboard payload — literal argument]\n{write_arg_m.group(1)[:500]}'
-            if write_arg_m else
+            f'[Clipboard payload — literal argument]\n{write_arg_text[:500]}'
+            if write_arg_text else
             f'[Shell command indicator near writeText() call]\n{_snippet(js, m)}'
         )
         findings.append({
@@ -1385,12 +1394,12 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
         r')',
         re.IGNORECASE | re.DOTALL,
     )
-    oauth_in_arg = bool(write_arg_m and _OAUTH_URL_RE.search(write_arg_m.group(1)))
+    oauth_in_arg = bool(write_arg_text and _OAUTH_URL_RE.search(write_arg_text))
     oauth_in_region = bool(_OAUTH_URL_RE.search(call_region))
     if oauth_in_arg or oauth_in_region:
         payload_evidence = (
-            f'[OAuth clipboard payload — literal argument]\n{write_arg_m.group(1)[:500]}'
-            if write_arg_m else
+            f'[OAuth clipboard payload — literal argument]\n{write_arg_text[:500]}'
+            if write_arg_text else
             f'[OAuth URL indicator near writeText() call]\n{_snippet(js, m)}'
         )
         findings.append({
