@@ -1507,6 +1507,37 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
     # script blob is already a very strong signal.
     shell_m = _SHELL_CMD_RE.search(js)
     if shell_m:
+        # Try to extract the full string literal containing the shell command.
+        # Unlike navigator.clipboard.writeText() — where the payload IS the
+        # function argument — execCommand() takes no payload argument.  The
+        # command string is assigned to a DOM element's .value property then
+        # selected and copied.  We recover it by finding any quoted string
+        # (double, single, or template literal) in the script that contains a
+        # shell indicator, which is the actual text that will land in the
+        # clipboard.
+        _PAYLOAD_QUOTE_RE = re.compile(
+            r'"([^"\n]{5,})"|'
+            r"'([^'\n]{5,})'|"
+            r'`([^`]{5,})`',
+        )
+        payload_text: str | None = None
+        for str_m in _PAYLOAD_QUOTE_RE.finditer(js):
+            candidate = str_m.group(1) or str_m.group(2) or str_m.group(3)
+            if candidate and _SHELL_CMD_RE.search(candidate):
+                payload_text = candidate[:500]
+                break
+
+        if payload_text:
+            evidence = (
+                f'[Clipboard payload]\n{payload_text}\n\n'
+                f'[Context]\n{_snippet(js, m)}'
+            )
+        else:
+            evidence = (
+                f'[Shell indicator near execCommand("copy")]\n{shell_m.group(0)}\n\n'
+                f'[Context]\n{_snippet(js, m)}'
+            )
+
         findings.append({
             'severity': 'CRITICAL',
             'category': 'JavaScript',
@@ -1519,10 +1550,7 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
                 'user is socially engineered into pasting and executing it. '
                 'Functionally identical to the navigator.clipboard.writeText() variant.'
             ),
-            'evidence': (
-                f'[Shell indicator near execCommand("copy")]\n{shell_m.group(0)}\n\n'
-                f'[Context]\n{_snippet(js, m)}'
-            ),
+            'evidence': evidence,
         })
     else:
         # execCommand('copy') with no obvious shell payload — could be a legitimate
