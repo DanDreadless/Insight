@@ -7,7 +7,7 @@ const DETECTION_METHODS = [
       'Eval-based obfuscation (eval/atob/unescape chains)',
       'Obfuscator.io hex-array string rotation',
       'String.fromCharCode character construction',
-      'High-entropy string detection (Shannon entropy > 4.8 bits/char)',
+      'High-entropy string detection (Shannon entropy > 5.5 bits/char HIGH, 4.8–5.5 MEDIUM)',
       'Cookie exfiltration and session theft patterns',
       'Form hijacking and credential harvesting',
       'Keyloggers (keyboard event + outbound network call)',
@@ -22,7 +22,13 @@ const DETECTION_METHODS = [
       'navigator.sendBeacon() to external domain',
       'document.write() loading external script',
       'Hidden iframe injection and forced downloads',
-      'Clipboard hijacking and autonomous clipboard writes',
+      'Clipboard hijacking — navigator.clipboard.writeText() with shell command payload (ClickFix)',
+      'ClickFix via legacy execCommand("copy") — shell command extracted from DOM element value',
+      'ConsentFix — OAuth authorization URL written to clipboard (Microsoft 365 / Google Workspace token theft)',
+      'Remote code execution chain: fetch() + eval() in async callback (compromised WordPress pattern)',
+      'Decrypt-then-execute: crypto.subtle.decrypt + eval() — encrypted runtime payload',
+      'Traffic distribution system (TDS) redirect via programmatic anchor click',
+      'Dynamic ES module import from unknown external URL (import("https://..."))',
       'Auto-redirects, devtools evasion, right-click disabling',
       'Split-join URL evasion',
       'bash -c / curl / wget to bare IP address (C2 indicator)',
@@ -45,7 +51,10 @@ const DETECTION_METHODS = [
       'Noscript block containing external URL redirect',
       'Inline script dominates page content (script-delivery vehicle)',
       'Fake browser update page (SocGholish / ClearFake signature)',
-      'Fake CAPTCHA / ClickFix (Win+R paste-and-run social engineering)',
+      'Fake CAPTCHA / ClickFix (Win+R, Ctrl+V, and terminal paste-and-run variants)',
+      'Shell command stored in hidden HTML element or data-* attribute (ClickFix payload staging)',
+      'DNS-prefetch staged external script (WordPress malware injection pattern)',
+      'External script preloaded via <link rel="preload"> from unknown domain',
       'IPFS-hosted resources (takedown-resistant phishing infrastructure)',
     ],
   },
@@ -59,6 +68,9 @@ const DETECTION_METHODS = [
       'Brand keywords in registered domain (typosquatting)',
       'Excessive subdomain depth',
       'Number substitution / l33t-speak impersonation (g00gle, paypa1)',
+      'Dot-to-hyphen encoded domain in subdomain (e.g. support-netcoin-com.zapier.app)',
+      'Abuse-prone free hosting with random subdomain (Cloudflare Pages, Firebase, Zapier, Glitch, etc.)',
+      'Cross-domain redirect detection (scanner cloaking pattern)',
     ],
   },
   {
@@ -98,6 +110,19 @@ const DETECTION_METHODS = [
       'Backend runtime and web server detection (PHP, Python, Node.js, etc.)',
       'CDN provider identification (Cloudflare, Fastly, Akamai, etc.)',
       'Payment and third-party SDK detection (Stripe, PayPal, etc.)',
+    ],
+  },
+  {
+    title: 'Renderer Analysis (Carapace)',
+    items: [
+      'Chromium headless DOM rendering — all assets pre-inlined, zero live network requests',
+      'Rust AST-based JavaScript static analysis via the oxc parser (structural, not regex)',
+      'eval() and new Function() code generation detection at AST level',
+      'Inline event handler (on* attributes) stripping and count telemetry',
+      '<script> and <iframe> tag sanitisation with volume reporting',
+      'javascript: / vbscript: / data:text/html URL detection in href/src attributes',
+      '<meta http-equiv="refresh"> redirect detection',
+      'Risk score (0–100) aggregating all renderer flag weights for quick triage',
     ],
   },
   {
@@ -144,10 +169,11 @@ export default function AboutPage() {
           <div>
             <p className="font-semibold text-white/85 mb-2">2. Content Analysis</p>
             <p>
-              The HTML, embedded scripts, HTTP headers, SSL certificate, and domain name are
-              analysed using pattern-matching, entropy analysis, and heuristic scoring entirely
-              within the scanner. No external threat intel APIs are used — detection catches
-              zero-day campaigns that reputation databases have not yet indexed.
+              The HTML, inline scripts, HTTP headers, SSL certificate, and domain are analysed
+              by pattern-matching, entropy scoring, and heuristics. The Carapace renderer
+              additionally performs Chromium headless DOM rendering and Rust AST-based JavaScript
+              analysis — all network requests blocked, zero external calls. No threat intel APIs
+              are used — detection catches zero-day campaigns reputation databases have not indexed.
             </p>
           </div>
           <div>
@@ -171,7 +197,7 @@ export default function AboutPage() {
         <ul className="text-sm text-white/65 space-y-2">
           <li>No credentials are stored or logged — only the submitted URL and scan findings.</li>
           <li>No active exploitation, port scanning, or vulnerability probing is performed.</li>
-          <li>JavaScript is not executed — dynamic content rendered client-side is not analysed.</li>
+          <li>JavaScript is not executed against live infrastructure. The Carapace renderer analyses DOM structure via Chromium headless with all network requests blocked — no live script execution reaches external servers.</li>
           <li>Detection is content-based only. Novel or highly targeted malware may evade static analysis.</li>
           <li>Rate limited to 5 scans per hour per IP address to prevent abuse.</li>
           <li>Only public HTTP/HTTPS URLs can be scanned — private networks and loopback addresses are blocked.</li>
