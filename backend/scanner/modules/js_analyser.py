@@ -1335,8 +1335,20 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
         # LoLBAS staging tools used in ClickFix DNS-staging chains (Microsoft, Jan 2026)
         r'nslookup\b|certutil\b|msiexec\b|'
         r'base64\s+-d|\|\s*bash|\|\s*sh\b|'
-        r'curl\b.{0,40}https?://|wget\b.{0,40}https?://',
+        r'curl\b.{0,40}https?://|wget\b.{0,40}https?://|'
+        # Windows registry manipulation and process termination — unambiguously hostile in clipboard payloads
+        r'reg\s+add\b|taskkill\b',
         re.IGNORECASE,
+    )
+
+    # Chrome Enterprise / MDM hijack indicators — used in ClickFix campaigns that force-enroll
+    # Chrome in a fake MDM and push malicious extensions via policy registry keys.
+    _CHROME_ENT_RE = re.compile(
+        r'HKLM.{0,80}Policies.{0,40}Google.{0,40}Chrome|'
+        r'CloudManagementEnrollmentToken|'
+        r'ExtensionSettings.{0,200}force_installed|'
+        r'force_installed.{0,200}ExtensionSettings',
+        re.IGNORECASE | re.DOTALL,
     )
 
     # Try literal string argument first (most reliable).
@@ -1361,7 +1373,7 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
 
     if shell_in_arg or shell_in_region:
         payload_evidence = (
-            f'[Clipboard payload — literal argument]\n{write_arg_text[:500]}'
+            f'[Clipboard payload — literal argument]\n{write_arg_text[:2000]}'
             if write_arg_text else
             f'[Shell command indicator near writeText() call]\n{_snippet(js, m)}'
         )
@@ -1378,6 +1390,38 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
             ),
             'evidence': payload_evidence,
         })
+
+        # Chrome Enterprise extension force-install — fires as a named companion finding when the
+        # payload contains registry keys that enroll Chrome in a fake MDM and push a malicious
+        # extension via force_installed policy.  Provides analysts with a specific attack label
+        # beyond the generic ClickFix clipboard finding.
+        chrome_ent_text = write_arg_text or call_region
+        if _CHROME_ENT_RE.search(chrome_ent_text):
+            findings.append({
+                'severity': 'CRITICAL',
+                'category': 'JavaScript',
+                'title': 'ClickFix clipboard payload — Chrome Enterprise extension force-install',
+                'description': (
+                    'The clipboard payload contains Windows registry commands that enroll Chrome '
+                    'in a fake Chrome Browser Cloud Management (MDM) tenant and configure the '
+                    'ExtensionSettings policy to force-install a malicious browser extension. '
+                    'The attack sequence: (1) reg add writes HKLM\\SOFTWARE\\Policies\\Google\\Chrome '
+                    'with a CloudManagementEnrollmentToken to hijack Chrome\'s enterprise policy channel; '
+                    '(2) a force_installed extension entry pointing to an attacker-controlled update URL '
+                    'causes Chrome to silently install the extension on next launch; '
+                    '(3) taskkill /f /im chrome.exe restarts Chrome to trigger the installation immediately. '
+                    'The victim performs all of these steps by pasting and running the clipboard payload, '
+                    'believing they are completing a CAPTCHA or verification. '
+                    'The installed extension typically harvests session cookies, intercepts web traffic, '
+                    'or exfiltrates credentials from every site the victim visits.'
+                ),
+                'evidence': (
+                    f'[Chrome Enterprise payload — literal argument]\n{write_arg_text[:2000]}'
+                    if write_arg_text else
+                    f'[Chrome Enterprise indicators near writeText() call]\n{_snippet(js, m)}'
+                ),
+            })
+
         return findings  # CRITICAL already emitted — skip INFO/MEDIUM below
 
     # --- Check 2: ConsentFix — OAuth authorization URL written to clipboard --
@@ -1398,7 +1442,7 @@ def _check_clipboard_hijacking(js: str) -> list[dict]:
     oauth_in_region = bool(_OAUTH_URL_RE.search(call_region))
     if oauth_in_arg or oauth_in_region:
         payload_evidence = (
-            f'[OAuth clipboard payload — literal argument]\n{write_arg_text[:500]}'
+            f'[OAuth clipboard payload — literal argument]\n{write_arg_text[:2000]}'
             if write_arg_text else
             f'[OAuth URL indicator near writeText() call]\n{_snippet(js, m)}'
         )
@@ -1503,7 +1547,8 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
         r'invoke-expression|\biex\b|invoke-restmethod|\birm\b|'
         r'nslookup\b|certutil\b|msiexec\b|'
         r'base64\s+-d|\|\s*bash|\|\s*sh\b|'
-        r'curl\b.{0,40}https?://|wget\b.{0,40}https?://',
+        r'curl\b.{0,40}https?://|wget\b.{0,40}https?://|'
+        r'reg\s+add\b|taskkill\b',
         re.IGNORECASE,
     )
 
@@ -1533,7 +1578,7 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
         for str_m in _PAYLOAD_QUOTE_RE.finditer(js):
             candidate = str_m.group(1) or str_m.group(2) or str_m.group(3)
             if candidate and _SHELL_CMD_RE.search(candidate):
-                payload_text = candidate[:500]
+                payload_text = candidate[:2000]
                 break
 
         if payload_text:
