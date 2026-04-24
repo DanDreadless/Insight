@@ -2866,6 +2866,93 @@ def _check_web3_skimmer_storage(js: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# REC-15 — Blockchain C2 loader (compromised WordPress plugins, 2025-2026)
+# ---------------------------------------------------------------------------
+
+def _check_blockchain_c2_loader(js: str) -> list[dict]:
+    """
+    Detect blockchain-based C2 loaders injected into compromised WordPress plugins.
+
+    Attack pattern (observed in-the-wild, 2025-2026):
+      1. Load ethers.js from a CDN (URL hidden inside atob()).
+      2. Connect to a public BSC/ETH JsonRpcProvider.
+      3. Call a smart contract getter (e.g. g()) to retrieve a base64-encoded payload.
+      4. eval(atob(payload)) — execute the fetched stage-2 payload.
+
+    The actual malicious code lives on-chain, making the C2 takedown-resistant
+    and invisible to static file analysis.  The contract owner can silently swap
+    the payload without touching the page source.
+
+    Distinct from _check_wallet_drainer (requires window.ethereum / signing) and
+    _check_web3_skimmer_storage (requires card-field proximity).  Fires whenever
+    blockchain provider + contract address + eval + .then() are co-located.
+
+    False-positive rate: near zero.  No legitimate code reads from a contract and
+    evals the result.
+    """
+    findings: list[dict] = []
+
+    provider_re = re.compile(
+        r'ethers\.(?:providers\.)?JsonRpcProvider\b|'
+        r'ethers\.Contract\b|'
+        r'\bnew\s+Web3\s*\(',
+        re.IGNORECASE,
+    )
+    provider_m = provider_re.search(js)
+    if not provider_m:
+        return findings
+
+    # Skip wallet-drainer variant (handled by _check_wallet_drainer)
+    if re.search(r'window\.ethereum\b|eth_requestAccounts|eth_sendTransaction', js, re.IGNORECASE):
+        return findings
+
+    # Proximity window — all signals must appear within 5000 chars of the provider match
+    region_start = max(0, provider_m.start() - 500)
+    region_end = min(len(js), provider_m.end() + 5000)
+    region = js[region_start:region_end]
+
+    # Hardcoded contract address (0x + 40 hex chars) must be present
+    addr_re = re.compile(r'"0x[0-9a-fA-F]{40}"')
+    addr_m_rel = addr_re.search(region)
+    if not addr_m_rel:
+        return findings
+
+    # eval() must be present — the payload execution step
+    if not re.search(r'\beval\s*\(', region, re.IGNORECASE):
+        return findings
+
+    # .then() must bridge the contract call to eval
+    if not re.search(r'\.then\s*\(', region, re.IGNORECASE):
+        return findings
+
+    # Locate absolute positions for evidence snippets
+    addr_abs_m = addr_re.search(js)
+    eval_abs_m = re.search(r'\beval\s*\(', js, re.IGNORECASE)
+
+    findings.append({
+        'severity': 'CRITICAL',
+        'category': 'JavaScript',
+        'title': 'Blockchain C2 loader — smart contract payload fetch and eval',
+        'description': (
+            'Script uses ethers.js or web3.js to connect to a blockchain RPC endpoint (BSC/ETH), '
+            'reads a base64-encoded payload from a smart contract, and executes it with eval(). '
+            'This blockchain-based command-and-control (C2) loader pattern has been injected into '
+            'compromised WordPress plugin files. The actual malicious payload (drainer, credential '
+            'harvester, or skimmer) is stored on-chain — the C2 infrastructure is takedown-resistant '
+            'and invisible to static file analysis. The contract owner can silently swap the payload '
+            'at any time without touching the page source. Visitor risk: arbitrary JavaScript '
+            'execution at every page load.'
+        ),
+        'evidence': (
+            f'[Blockchain provider / contract access]\n{_snippet(js, provider_m)}\n\n'
+            f'[Smart contract address]\n{_snippet(js, addr_abs_m)}\n\n'
+            f'[Payload execution via eval]\n{_snippet(js, eval_abs_m)}'
+        ),
+    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # REC-14 — WebAssembly-based code obfuscation (Wobfuscator, NDSS 2026)
 # ---------------------------------------------------------------------------
 
@@ -3017,6 +3104,7 @@ def analyse_js(js_content: str, source_url: str = '', beautify: bool = True) -> 
         add_findings(_check_mutation_observer_skimmer(js))
         add_findings(_check_blob_iframe_injection(js))
         add_findings(_check_web3_skimmer_storage(js))
+        add_findings(_check_blockchain_c2_loader(js))
         add_findings(_check_wasm_obfuscation(js))
 
     # Sort by severity
