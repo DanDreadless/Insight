@@ -1610,6 +1610,20 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
         # execCommand('copy') with no obvious shell payload — could be a legitimate
         # "copy to clipboard" button using the old API.  Flag MEDIUM (same reasoning
         # as the writeText() fallback: cannot confirm benign without user-gesture context).
+        # Try to recover what's being placed in the clipboard by finding the nearest
+        # .value = ... assignment before the execCommand call (standard pattern:
+        # el.value = payload; el.select(); execCommand('copy')).
+        _VALUE_ASSIGN_RE = re.compile(r'\.value\s*=\s*(.{1,300})')
+        window_before = js[max(0, m.start() - 1500):m.start()]
+        value_matches = list(_VALUE_ASSIGN_RE.finditer(window_before))
+        if value_matches:
+            payload_context = value_matches[-1].group(0)[:300].strip()
+            evidence = (
+                f'[execCommand copy call]\n{_snippet(js, m)}\n\n'
+                f'[Clipboard payload (nearest .value assignment)]\n{payload_context}'
+            )
+        else:
+            evidence = f'[execCommand copy call]\n{_snippet(js, m)}'
         findings.append({
             'severity': 'MEDIUM',
             'category': 'JavaScript',
@@ -1620,7 +1634,7 @@ def _check_execcommand_clipboard(js: str) -> list[dict]:
                 'May be a legacy "copy to clipboard" button or an obfuscated ClickFix payload '
                 'where the command string is dynamically assembled.'
             ),
-            'evidence': f'[execCommand copy call]\n{_snippet(js, m)}',
+            'evidence': evidence,
         })
     return findings
 
